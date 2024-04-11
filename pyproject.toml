@@ -1,0 +1,36 @@
+[project]
+
+name = "ccm-project"
+version = "0.1.0"
+description = "Term project for Computational Cognitive Modeling"
+readme = "README.md"
+authors = [
+    { name = "Jackson Petty", email = "research@jacksonpetty.org" },
+    { name = "William Timkey", email = "wpt2011@nyu.edu" },
+    { name = "Cara Leong", email = "caraleong@nyu.edu" }
+]
+
+dependencies = [
+    "datasets >= 2.15",
+    "sfirah @ git+https://github.com/jopetty/sfirah",
+    "humanize >= 4.9",
+    "ipykernel >= 6.27",
+    "wandb >= 0.16",
+    "tqdm >= 4.66",
+    "pydotenv >= 0.0",
+    "pyrootutils >= 1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pre-commit"]
+
+[tool.ruff]
+select = ["D", "E", "F", "I", "N"]
+line-length = 88
+extend-include = ["*.ipynb"]
+extend-exclude = [
+    "data/",
+]
+
+[tool.ruff.pydocstyle]
+convention = "google"
