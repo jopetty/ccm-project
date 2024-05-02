@@ -67,7 +67,13 @@ class OSFArgs:
 
 def tokenize(examples: DatasetDict, tokenizer: PreTrainedTokenizerFast) -> DatasetDict:
     """Tokenize dataset."""
-    return tokenizer(examples["text"])
+    return tokenizer(
+        examples["text"],
+        padding="max_length",
+        max_length=512,
+        truncation=True,
+        return_tensors="pt",
+    )
 
 
 def stack_sequences(examples: DatasetDict, block_size: int | None = None):
