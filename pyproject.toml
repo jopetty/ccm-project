@@ -11,18 +11,18 @@ authors = [
 ]
 
 dependencies = [
-    "datasets >= 2.15",
+    "datasets == 2.19.0",
     "accelerate == 0.29.2",
     "fire == 0.6.0",
-    "humanize >= 4.9",
-    "ipykernel >= 6.27",
-    "wandb >= 0.16",
-    "tqdm >= 4.66",
+    "humanize == 4.9.0",
+    "ipykernel == 6.29.4",
+    "wandb == 0.16.6",
+    "tqdm == 4.66.2",
     "osfclient == 0.0.5",
-    "pydotenv >= 0.0",
-    "pyrootutils >= 1.0",
+    "pydotenv == 1.0.1",
+    "pyrootutils == 1.0.4",
     "transformers == 4.39.3",
-    "flax == 0.8.2"
+    "torch == 2.3.0"
 ]
 
 [project.optional-dependencies]
