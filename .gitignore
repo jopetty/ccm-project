@@ -162,3 +162,5 @@ cython_debug/
 data/
 outputs/
 wandb/
+src/.DS_Store
+.vscode/launch.json

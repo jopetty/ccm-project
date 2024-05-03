@@ -15,6 +15,8 @@ from tokenizers.pre_tokenizers import WhitespaceSplit
 from tokenizers.processors import TemplateProcessing
 from transformers import PreTrainedTokenizerFast
 
+import torch
+
 PROJECT_ROOT = path = pyrootutils.find_root(
     search_from=__file__, indicator=".project-root"
 )
@@ -192,6 +194,37 @@ def get_initial_tokenizer(unique_tokens: set[str]):
 
     return tokenizer
 
+def merge_new_tokens(total_merge_probs, total_merge_counts, num_to_merge, tokenizer, model, alpha_toks, prev_merged):
+    #compute merge score - ratio of bigram conditional to unigram probability of a token
+    bigram_probs = total_merge_probs / total_merge_counts
+    unigram_probs = total_merge_probs.sum(axis=0) / total_merge_counts.sum(axis=0)
+    merge_scores = bigram_probs / unigram_probs #P(wi|wi-1)/ P(wi)
+    merge_scores = torch.nan_to_num(merge_scores)
+
+    #get top num_to_merge valid token pairs
+    merge_scores_ranked = merge_scores.flatten().argsort(descending=True)
+    merge_scores_ranked = (merge_scores_ranked // merge_scores.shape[0], merge_scores_ranked % merge_scores.shape[0])
+    top_alphas = [(merge_scores_ranked[0][x].item(), merge_scores_ranked[1][x].item()) for x in range(len(merge_scores_ranked[0])) if (merge_scores_ranked[0][x].item() in alpha_toks) and (merge_scores_ranked[1][x].item() in alpha_toks) and ((merge_scores_ranked[0][x].item(), merge_scores_ranked[1][x].item()) not in prev_merged)][:num_to_merge]
+    new_toks = [tokenizer.decode(x) + tokenizer.decode(y) for x,y in top_alphas]
+    
+    #update counters
+    alpha_toks.update(range(len(tokenizer), len(tokenizer)+len(new_toks)))
+    prev_merged.update(top_alphas)
+
+    #add tokens to tokenizer
+    tokenizer.add_tokens(new_toks)
+
+    #update model's embedding matrix for new tokens as average of pair
+    #if you know of a better way to do this; feel free to modify
+    #could also initialize model to full target embedding size and fill in new tokens rather than resizing each time.
+    model.resize_token_embeddings(len(tokenizer))
+    model_embs = model.get_input_embeddings()
+    new_embs = model_embs.weight[top_alphas].mean(axis=1)
+    model_embs.weight[len(tokenizer) - len(new_toks):] = new_embs
+    model.set_input_embeddings(model_embs)
+    model.tie_weights()
+    print('Newly added tokens', new_toks)
+    return tokenizer, model, alpha_toks
 
 def construct_dataset(
     seed: int, block_size: int, large_track: bool, subsample: int | None
