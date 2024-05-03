@@ -19,22 +19,24 @@ dependencies = [
     "wandb == 0.16.6",
     "tqdm == 4.66.2",
     "osfclient == 0.0.5",
-    "pydotenv == 1.0.1",
+    "python-dotenv == 1.0.1",
     "pyrootutils == 1.0.4",
     "transformers == 4.39.3",
-    "torch == 2.3.0"
+    "torch == 2.3.0",
+    "scipy == 1.13.0"
 ]
 
 [project.optional-dependencies]
 dev = ["pre-commit"]
 
 [tool.ruff]
-select = ["D", "E", "F", "I", "N"]
 line-length = 88
 extend-include = ["*.ipynb"]
-extend-exclude = [
-    "data/",
-]
+extend-exclude = ["data/"]
 
-[tool.ruff.pydocstyle]
+[tool.ruff.lint]
+select = ["E", "F", "I", "N"]
+# ignore = ["D107"]
+
+[tool.ruff.lint.pydocstyle]
 convention = "google"

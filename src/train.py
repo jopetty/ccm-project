@@ -193,9 +193,15 @@ def main(
         model, optimizer, train_dataloader, eval_dataloader
     )
 
-    total_merge_probs = torch.zeros((len(tokenizer), len(tokenizer)), device=model.device)
-    total_merge_counts = torch.zeros((len(tokenizer), len(tokenizer)), dtype=int, device=model.device)
-    alpha_toks = set([idx for tok, idx in tokenizer.get_added_vocab().items() if tok.isalpha()])
+    total_merge_probs = torch.zeros(
+        (len(tokenizer), len(tokenizer)), device=model.device
+    )
+    total_merge_counts = torch.zeros(
+        (len(tokenizer), len(tokenizer)), dtype=int, device=model.device
+    )
+    alpha_toks = set(
+        [idx for tok, idx in tokenizer.get_added_vocab().items() if tok.isalpha()]
+    )
     prev_merged = set()
     global_step = 0
     for _ in (n_bar := tqdm(range(num_epochs), desc="Epochs", position=0, leave=False)):
@@ -208,7 +214,7 @@ def main(
 
             target = batch["labels"].flatten()
             logits = output.logits.flatten(end_dim=-2)
-            loss = F.cross_entropy(logits, target, reduction='none')
+            loss = F.cross_entropy(logits, target, reduction="none")
             accelerator.backward(loss.mean())
 
             if gradient_clip is not None:
@@ -227,12 +233,14 @@ def main(
                 step=global_step,
             )
 
-            #update bigram prob and count tracker (had to do this iteratively bc memory overhead was too large if tensorized; hope its not too slow)
+            # update bigram prob and count tracker
+            # (had to do this iteratively bc memory overhead was too large if
+            # tensorized; hope its not too slow)
             target_toks, probs = target[target >= 0], (-loss[target >= 0]).exp()
             for w_i in range(1, target_toks.shape[0]):
-                total_merge_probs[target_toks[w_i-1], target_toks[w_i]] += probs[w_i]
-                total_merge_counts[target_toks[w_i-1], target_toks[w_i]] += 1
-            
+                total_merge_probs[target_toks[w_i - 1], target_toks[w_i]] += probs[w_i]
+                total_merge_counts[target_toks[w_i - 1], target_toks[w_i]] += 1
+
             if global_step % eval_every == 0:
                 model.eval()
                 with torch.no_grad():
@@ -257,12 +265,20 @@ def main(
                         step=global_step,
                     )
                 model.train()
-
-                        #this can be placed at any point in the loop, maybe like a few times each epoch?
+                # this can be placed at any point in the loop,
+                # maybe like a few times each epoch?
             if global_step % update_vocab_every == 0:
                 with torch.no_grad():
-                    merge_new_tokens(total_merge_probs, total_merge_counts, num_vocab_merges_per_step, tokenizer, model, alpha_toks, prev_merged)
-            #todo: need to re-tokenize inputs after vocab update
+                    merge_new_tokens(
+                        total_merge_probs,
+                        total_merge_counts,
+                        num_vocab_merges_per_step,
+                        tokenizer,
+                        model,
+                        alpha_toks,
+                        prev_merged,
+                    )
+            # todo: need to re-tokenize inputs after vocab update
 
     accelerator.end_training()
     model.save_pretrained(project_dir)
