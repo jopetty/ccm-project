@@ -5,6 +5,7 @@ import zipfile
 from enum import StrEnum
 from functools import partial
 from multiprocessing import Pool
+import requests
 
 import pyrootutils
 from datasets import Dataset, DatasetDict, load_dataset
@@ -87,6 +88,40 @@ def stack_sequences(examples: DatasetDict, block_size: int | None = None):
     result["labels"] = result["input_ids"].copy()
 
     return result
+
+
+def load_references():
+    """Download and format reference data."""
+    reference_files = {"wordlist.txt": "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt",
+                       "sigmorphon_train.tsv": "https://raw.githubusercontent.com/sigmorphon/2022SegmentationST/main/data/eng.word.train.tsv",
+                       "sigmorphon_dev.tsv": "https://raw.githubusercontent.com/sigmorphon/2022SegmentationST/main/data/eng.word.dev.tsv",
+                       "aoa_ws_fit.csv": "https://gist.githubusercontent.com/craaaa/1c254cdc29bbe3f9ab25d66afc3ecfa3/raw/079968f76b94a1d38da066306c5b8688d2927018/gistfile1.txt",
+                       }
+    os.makedirs(PROJECT_ROOT / "data/references", exist_ok=True)
+
+    for fname, url in reference_files.items():
+        print(f"Getting {fname}")
+        get_response = requests.get(url)
+        if get_response.ok:
+            with open(PROJECT_ROOT / "data/references" / fname, 'w') as f:
+                f.write(get_response.text)
+        else:
+            print(f"Could not obtain {fname} from {url}")
+
+    morphemes = set()
+    files = [PROJECT_ROOT / "data/references" / "sigmorphon_train.tsv",
+            PROJECT_ROOT / "data/references" / "sigmorphon_dev.tsv"
+            ]
+    for fname in files:
+        with open(fname, 'r') as f:
+            for line in f:
+                word, morphs, _ = line.split("\t")
+                m = morphs.strip().replace("@@","").split(" ")
+                morphemes.update(m)
+
+    with open(PROJECT_ROOT / "data/references" / "sigmorphon_morphemes.txt", 'w') as f:
+        for line in morphemes:
+            f.write(line + "\n")
 
 
 def download_data():
@@ -226,4 +261,5 @@ def construct_dataset(
 
 
 if __name__ == "__main__":
+    load_references()
     load_data()
