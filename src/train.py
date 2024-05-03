@@ -9,19 +9,20 @@ from pprint import pformat
 from random import randint
 
 import fire
-import flax
-import jax
-import jax.numpy as jnp
-import optax
+import humanize
 import pyrootutils
+import torch
+import torch.nn.functional as F  # noqa: N812
+from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from dotenv import load_dotenv
-from flax.training import train_state
-from flax.training.common_utils import get_metrics, onehot, shard
+from torch import optim
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (
-    FlaxAutoModelForCausalLM,
+    AutoModelForCausalLM,
+    DataCollatorForLanguageModeling,
     GPT2Config,
 )
 
@@ -42,70 +43,6 @@ PROJECT_ROOT = path = pyrootutils.find_root(
 load_dotenv()
 
 
-def data_loader(rng, dataset, batch_size, shuffle=False):
-    """Flax data loader."""
-    steps_per_epoch = len(dataset) // batch_size
-
-    if shuffle:
-        batch_idx = jax.random.permutation(rng, len(dataset))
-    else:
-        batch_idx = jnp.arange(len(dataset))
-
-    batch_idx = batch_idx[: steps_per_epoch * batch_size]  # Skip incomplete batch.
-    batch_idx = batch_idx.reshape((steps_per_epoch, batch_size))
-
-    for idx in batch_idx:
-        batch = dataset[idx]
-        batch = {k: jnp.array(v) for k, v in batch.items()}
-
-        batch = shard(batch)
-
-        yield batch
-
-
-def train_step(state, batch, dropout_rng, schedule_fn):
-    """Flax training step."""
-    dropout_rng, new_dropout_rng = jax.random.split(dropout_rng)
-
-    def loss_fn(params):
-        labels = batch.pop("labels")
-        logits = state.apply_fn(
-            **batch, params=params, dropout_rng=dropout_rng, train=True
-        )[0]
-
-        loss = optax.softmax_cross_entropy(
-            logits[..., :-1, :], onehot(labels[..., 1:], logits.shape[-1])
-        ).mean()
-        return loss
-
-    grad_fn = jax.value_and_grad(loss_fn)
-    loss, grad = grad_fn(state.params)
-    grad = jax.lax.pmean(grad, "batch")
-    new_state = state.apply_gradients(grads=grad)
-
-    metrics = jax.lax.pmean(
-        {"loss": loss, "learning_rate": schedule_fn(state.step)}, axis_name="batch"
-    )
-
-    return new_state, metrics, new_dropout_rng
-
-
-def eval_step(params, batch, model):
-    """Flax evaluation step."""
-    labels = batch.pop("labels")
-
-    logits = model(**batch, params=params, train=False)[0]
-
-    loss = optax.softmax_cross_entropy(
-        logits[..., :-1, :], onehot(labels[..., 1:], logits.shape[-1])
-    ).mean()
-
-    # summarize metrics
-    metrics = {"loss": loss, "perplexity": jnp.exp(loss)}
-    metrics = jax.lax.pmean(metrics, axis_name="batch")
-    return metrics
-
-
 def main(
     # Model Parameters
     d_model: int = 512,
@@ -122,8 +59,9 @@ def main(
     lr: float = 1e-4,
     beta1: float = 0.9,
     beta2: float = 0.999,
+    compile: bool = False,
     weight_decay: float = 0.01,
-    eval_every: int = 1,
+    eval_every: int = 100,
     gradient_clip: float | None = 1.0,
     block_size: int = 512,
     stack_sequences: bool = True,
@@ -134,10 +72,12 @@ def main(
     output_dir: Path = PROJECT_ROOT / "outputs",
     seed: int = randint(0, 2**32 - 1),
     project_name: str = "ccm_project_test",
+    logging: bool = True,
 ):
     """Train models."""
     set_seed(seed)
-    os.environ["WANDB_PROJECT"] = project_name
+
+    accelerator = Accelerator(log_with="wandb") if logging else Accelerator()
 
     # create project directory inside output_dir based on the timestamp
     # plus a two-character random string
@@ -167,6 +107,7 @@ def main(
         "per_device_batch_size": per_device_batch_size,
         "betas": (beta1, beta2),
         "block_size": block_size,
+        "compile": compile,
         "d_model": d_model,
         "d_ff": d_ff,
         "dropout": dropout,
@@ -186,7 +127,13 @@ def main(
         "weight_decay": weight_decay,
     }
 
-    print(f"Config: {pformat(project_hps)}")
+    accelerator.init_trackers(
+        project_name,
+        config=project_hps,
+    )
+
+    log.info(f"Config: {pformat(project_hps)}")
+    log.info(f"Dataset: {dataset}")
 
     with open(project_dir / "project_hps.json", "w") as f:
         json.dump(project_hps, f)
@@ -205,79 +152,102 @@ def main(
         eos_token_id=tokenizer.eos_token_id,
         bos_token_id=tokenizer.bos_token_id,
     )
-    model = FlaxAutoModelForCausalLM.from_config(
-        gpt_config, seed=seed, dtype=jnp.dtype("bfloat16")
+    model = AutoModelForCausalLM.from_config(
+        gpt_config,
     )
 
-    print(f"Model: {model}")
-
-    # Training
-    total_batch_size = per_device_batch_size * jax.device_count()
-    num_train_steps = len(dataset["train"]) // total_batch_size * num_epochs
-
-    linear_decay_lr_schedule_fn = optax.linear_schedule(
-        init_value=lr, end_value=0, transition_steps=num_train_steps
+    log.info(f"Model: {model}")
+    log.info(
+        f"Number of parameters: {humanize.intword(model.num_parameters)}"
+        f" ({model.num_parameters})"
     )
-    adamw = optax.adamw(
-        learning_rate=linear_decay_lr_schedule_fn,
-        b1=beta1,
-        b2=beta2,
-        eps=1e-8,
+    log.info(f"Accelerator state: {accelerator.state}")
+
+    device = accelerator.device
+
+    model = model.to(device)
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=lr,
+        betas=(beta1, beta2),
         weight_decay=weight_decay,
     )
 
-    state = train_state.TrainState.create(
-        apply_fn=model.__call__, params=model.params, tx=adamw
+    data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
+    train_dataloader = DataLoader(
+        dataset["train"],
+        shuffle=False,
+        batch_size=per_device_batch_size,
+        collate_fn=data_collator,
+    )
+    eval_dataloader = DataLoader(
+        dataset["validation"],
+        shuffle=False,
+        batch_size=per_device_batch_size,
+        collate_fn=data_collator,
     )
 
-    parallel_train_step = jax.pmap(train_step, "batch")
-    parallel_eval_step = jax.pmap(eval_step, "batch")
+    model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
+        model, optimizer, train_dataloader, eval_dataloader
+    )
 
-    state = flax.jax_utils.replicate(state)
+    global_step = 0
+    for _ in (n_bar := tqdm(range(num_epochs), desc="Epochs", position=0, leave=False)):
+        model.train()
+        for batch in tqdm(train_dataloader, desc="Train", position=1, leave=False):
+            global_step += 1
+            optimizer.zero_grad()
 
-    rng = jax.random.PRNGKey(seed)
-    dropout_rngs = jax.random.split(rng, jax.local_device_count())
+            output = model(**batch)
 
-    for epoch in tqdm(
-        range(1, num_epochs + 1), desc="Epoch ...", position=0, leave=True
-    ):
-        rng, input_rng = jax.random.split(rng)
+            target = batch["labels"].flatten()
+            logits = output.logits.flatten(end_dim=-2)
+            loss = F.cross_entropy(logits, target).item()
 
-        train_loader = data_loader(
-            input_rng, dataset["train"], total_batch_size, shuffle=True
-        )
-        with tqdm(
-            total=len(dataset["train"]) // total_batch_size,
-            desc="Training...",
-            leave=False,
-        ) as pbar_train:
-            for model_inputs in train_loader:
-                state, train_metric, dropout_rngs = parallel_train_step(
-                    state, model_inputs, dropout_rngs, linear_decay_lr_schedule_fn
+            accelerator.backward(loss)
+
+            if gradient_clip is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), gradient_clip, norm_type=2.0
                 )
-                pbar_train.update(1)
-            pbar_train.write(
-                f"Train... ({epoch}/{num_epochs} | Loss: {round(train_metric['loss'].mean(), 3)}, Learning Rate: {round(train_metric['learning_rate'].mean(), 6)})"  # noqa: E501
+
+            optimizer.step()
+
+            n_bar.set_postfix({"loss": f"{loss:.5f}"})
+            accelerator.log(
+                {
+                    "train/custom_loss": loss,
+                    "train/hf_loss": output.loss,
+                },
+                step=global_step,
             )
 
-        eval_loader = data_loader(input_rng, dataset["validation"], total_batch_size)
-        eval_metrics = []
-        with tqdm(
-            total=len(dataset["validation"]) // total_batch_size,
-            desc="Evaluation...",
-            leave=False,
-        ) as pbar_eval:
-            for model_inputs in eval_loader:
-                eval_metric = parallel_eval_step(state.params, model_inputs)
-                eval_metrics.append(eval_metric)
-                pbar_eval.update(1)
+            if global_step % eval_every == 0:
+                model.eval()
+                with torch.no_grad():
+                    val_losses = []
+                    for batch in tqdm(
+                        eval_dataloader, desc="Eval", position=1, leave=False
+                    ):
+                        output = model(**batch)
+                        target = batch["labels"].flatten()
+                        logits = output.logits.flatten(end_dim=-2)
+                        loss = F.cross_entropy(logits, target)
+                        val_losses.append((loss, output.loss))
 
-            eval_metrics = get_metrics(eval_metrics)
-            eval_metrics = jax.tree_map(jnp.mean, eval_metrics)
-            pbar_eval.write(
-                f"Eval... ({epoch}/{num_epochs} | Loss: {eval_metrics['loss']} | Perplexity: {eval_metrics['perplexity']})"  # noqa: E501
-            )
+                    eval_samples = len(val_losses)
+                    custom_val_loss = sum([x[0] for x in val_losses]) / eval_samples
+                    hf_val_loss = sum([x[1] for x in val_losses]) / eval_samples
+                    accelerator.log(
+                        {
+                            "eval/custom_loss": custom_val_loss,
+                            "eval/hf_loss": hf_val_loss,
+                        },
+                        step=global_step,
+                    )
+                model.train()
 
+    accelerator.end_training()
     model.save_pretrained(project_dir)
 
 
