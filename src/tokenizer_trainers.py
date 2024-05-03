@@ -89,7 +89,7 @@ def get_desired_vocab_size(step: int, initial_alphabet: list[str]):
     """Gets the desired vocab size at this step.
     Minimally, the vocab size should be the same size as initial_alphabet."""
     # TODO: Make this more sensible
-    return int(exp(step) + len(initial_alphabet))
+    return int(exp(step+1) + len(initial_alphabet))
 
 
 def main(
@@ -144,19 +144,17 @@ def main(
         end_points = range(0, len(dataset), step_size)
         if retrain:
             steps = [(0, step) for step in end_points]
-            steps.append((0, len(dataset)))
+            steps[-1] = ((0, len(dataset)))
         else:
             steps = list(pairwise(end_points))
-            steps.append((end_points[-1], len(dataset)))
+            steps[-1] = (end_points[-2], len(dataset)) 
         desired_vocab_sizes = [get_desired_vocab_size(i, initial_alphabet) for i in range(len(steps))]
     else: # not incremental; just do one step
         steps = [(0,len(dataset))]
         desired_vocab_sizes = [vocab_size,]
 
-    for ((s, e), v) in zip(steps, desired_vocab_sizes):
-        print(f"Start: {s}, End: {e}, Vocab Size: {v}")
-
     for i, ((s, e), desired_vocab_size) in enumerate(zip(steps, desired_vocab_sizes)):
+        print(f"Start: {s}, End: {e}, Vocab Size: {desired_vocab_size}")
         trainer = BPETokenizerTrainer(vocab_size=desired_vocab_size, min_frequency=min_frequency)
 
         trainer.train(dataset=dataset["text"][s:e], initial_alphabet=previous_alphabet)
