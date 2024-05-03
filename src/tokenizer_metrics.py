@@ -3,8 +3,20 @@ from numpy import isnan
 import pandas as pd
 import regex as re
 from statistics import median
+import pyrootutils
 from scipy.stats import spearmanr
 from transformers import AutoTokenizer
+
+
+PROJECT_ROOT = path = pyrootutils.find_root(
+    search_from=__file__, indicator=".project-root"
+)
+
+
+WORDLIST_FILE = PROJECT_ROOT / "data/references/wordlist.txt"
+MORPHEME_FILE = PROJECT_ROOT / "data/references/sigmorphon_morphemes.txt"
+AOA_FIT_FILE = PROJECT_ROOT / "data/references/aoa_ws_fit.csv"
+SIGMORPHON_DEV_FILE = PROJECT_ROOT / "data/references/sigmorphon_dev.tsv"
 
 
 class SingleTokenizerMetric(ABC):
@@ -16,6 +28,12 @@ class SingleTokenizerMetric(ABC):
     @abstractmethod
     def calculate(self) -> float:
         ...
+
+    def get_words_from_file(self, word_file):
+        words = []
+        with open(word_file, 'r') as f:
+            words = [w.strip().lower() for w in f.readlines()]
+        return set(words)
 
 
 class MultiTokenizerMetric(ABC):
@@ -48,11 +66,10 @@ class AverageTokenLength(SingleTokenizerMetric):
             pass
 
 
-
 class AlignmentWithCDI(MultiTokenizerMetric):
     """Given n tokenizers representing increasing subsets, calculate
     how aligned whole-word token acquisition is to human CDI rates. """
-    def __init__(self, tokenizers: list[AutoTokenizer], cdi_csv_file: str) -> None:
+    def __init__(self, tokenizers: list[AutoTokenizer], cdi_csv_file: str = AOA_FIT_FILE) -> None:
         super().__init__(tokenizers)
         self.cdi_aoa = self.format_cdi_file(cdi_csv_file)
 
@@ -115,21 +132,15 @@ class TokenizerOverlap(MultiTokenizerMetric):
             tokens.append(set(t.get_vocab().keys()))
         overlap = set.intersection(*tokens)
         total = set.union(*tokens)
-        return len(overlap) / len(total)
+        return len(overlap) * 1.0 / len(total)
 
 
 class CorrespondenceWithWords(SingleTokenizerMetric):
-    """How many tokens in the tokenizer correspond to an English word."""
-    def __init__(self, tokenizer: AutoTokenizer, word_file: str) -> None:
+    """How many tokens in the tokenizer correspond to an English word.
+        Using words from https://github.com/dwyl/english-words/blob/master/words_alpha.txt"""
+    def __init__(self, tokenizer: AutoTokenizer, word_file: str = WORDLIST_FILE) -> None:
         super().__init__(tokenizer)
         self.word_list = self.get_words_from_file(word_file)
-
-
-    def get_words_from_file(self, word_file):
-        words = []
-        with open(word_file, 'r') as f:
-            words = [w.strip().lower() for w in f.readlines()]
-        return set(words)
 
     
     def calculate(self) -> float:
@@ -140,11 +151,37 @@ class CorrespondenceWithWords(SingleTokenizerMetric):
 
 class CorrespondenceWithMorphemes(SingleTokenizerMetric):
     """How many tokens correspond with an English morpheme
-    Using morphemes from this list?: https://education.ufl.edu/patterson/files/2020/05/Morphemes-and-Their-Meanings.pdf
-    """
-    def __init__(self, tokenizer: AutoTokenizer) -> None:
-        pass
+        Using morphemes from the SIGMORPHON Shared Task 2022 + word list."""
+    def __init__(self, tokenizer: AutoTokenizer, morpheme_file: str = MORPHEME_FILE, word_file: str = WORDLIST_FILE) -> None:
+        super().__init__(tokenizer)
+        self.word_list = self.get_words_from_file(morpheme_file)
+        self.word_list.update(self.get_words_from_file(word_file))
 
     
     def calculate(self) -> float:
-        pass
+        tokens = set(self.tokenizer.get_vocab().keys())
+        overlap = self.word_list.intersection(tokens)
+        return len(overlap) / len(tokens)
+
+
+class SplitsIntoMorphemes(SingleTokenizerMetric):
+    """How many words are split into the same number of morphemes as their gold split."""
+    def __init__(self, tokenizer: AutoTokenizer, sigmorphon_dev: str = SIGMORPHON_DEV_FILE) -> None:
+        super().__init__(tokenizer)
+        self.words_and_morphs = self.get_morpheme_counts(sigmorphon_dev)
+
+    
+    def calculate(self) -> float:
+        words, gold_num_morphs = map(list, zip(*self.words_and_morphs))
+        tokenized_words = self.tokenizer.encode_batch(list(words), add_special_tokens=False)
+        same_morphs = [len(x.ids) == len(y) for x,y in zip(tokenized_words, gold_num_morphs)]
+        return sum(same_morphs) * 1.0 / len(words)
+
+
+    def get_morpheme_counts(self, sigmorphon_dev_file) -> list[(str, list[str])]:
+        counts = []
+        with open(sigmorphon_dev_file, 'r') as f:
+            for line in f:
+                word, morphs, _ = line.split("\t")
+                counts.append((word.strip(), morphs.replace("@@","").split(" ")))
+        return counts
