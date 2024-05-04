@@ -2,50 +2,21 @@
 
 import os
 import zipfile
-from enum import StrEnum
 from functools import partial
 from multiprocessing import Pool
 
 import pyrootutils
 import requests
 import torch
+from character_tokenizer import CharacterTokenizer
 from datasets import Dataset, DatasetDict, load_dataset
 from osfclient import cli
-from tokenizers import Tokenizer
-from tokenizers.models import WordLevel
-from tokenizers.pre_tokenizers import WhitespaceSplit
-from tokenizers.processors import TemplateProcessing
 from transformers import PreTrainedTokenizerFast
 from unidecode import unidecode
 
 PROJECT_ROOT = path = pyrootutils.find_root(
     search_from=__file__, indicator=".project-root"
 )
-
-
-class SpecialTokens(StrEnum):
-    """Special tokens for tokenizer."""
-
-    BOS = "[BOS]"
-    UNK = "[UNK]"
-    EOS = "[EOS]"
-    SEP = "[SEP]"
-    CLS = "[CLS]"
-    PAD = "[PAD]"
-    MASK = "[MASK]"
-
-    @classmethod
-    def values(cls):
-        """Return a list of the string values of each special token."""
-        return list(map(lambda c: c.value, cls))
-
-    @property
-    def index(self):
-        """Return the index of the token in the vocabulary.
-
-        Used to get the index of the PAD token when directly modifying tensors.
-        """
-        return SpecialTokens.values().index(self.value)
 
 
 class OSFArgs:
@@ -201,53 +172,6 @@ def load_data(large_track: bool, subsample: int | None, seed: int) -> dict:
     }
 
 
-def get_initial_tokenizer(unique_tokens: set[str]):
-    """Get char-level tokenizer."""
-    tokenizer_base = Tokenizer(WordLevel(unk_token=SpecialTokens.UNK))
-    # tokenizer_base.normalizer = normalizers.Sequence([
-    #     NFD(),
-    #     StripAccents(),
-    #     Lowercase()
-    # ])
-
-    tokenizer_base.pre_tokenizer = WhitespaceSplit()
-    tokenizer_base.add_special_tokens(SpecialTokens.values())
-    tokenizer_base.add_tokens(list(unique_tokens))
-
-    tokenizer_base.post_processor = TemplateProcessing(
-        single=f"{SpecialTokens.BOS} $A",
-        special_tokens=[
-            (SpecialTokens.BOS, tokenizer_base.token_to_id(SpecialTokens.BOS)),
-        ],
-    )
-
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=tokenizer_base,
-        bos_token=SpecialTokens.BOS,
-        eos_token=SpecialTokens.EOS,
-        unk_token=SpecialTokens.UNK,
-        pad_token=SpecialTokens.EOS,  # use [EOS] as [PAD]
-        mask_token=SpecialTokens.MASK,
-        sep_token=SpecialTokens.SEP,
-        cls_token=SpecialTokens.CLS,
-    )
-    tokenizer.add_special_tokens(
-        {
-            "pad_token": SpecialTokens.EOS,
-            "mask_token": SpecialTokens.MASK,
-            "sep_token": SpecialTokens.SEP,
-            "cls_token": SpecialTokens.CLS,
-            "unk_token": SpecialTokens.UNK,
-            "bos_token": SpecialTokens.BOS,
-            "eos_token": SpecialTokens.EOS,
-        }
-    )
-    tokenizer.padding_side = "left"
-    tokenizer.pad_token_id = tokenizer.eos_token_id
-
-    return tokenizer
-
-
 def merge_new_tokens(
     total_merge_probs,
     total_merge_counts,
@@ -322,7 +246,7 @@ def construct_dataset(
     all_chars = data["all_chars"]
 
     if tokenizer is None:
-        tokenizer = get_initial_tokenizer(all_chars)
+        tokenizer = CharacterTokenizer(all_chars, model_max_length=block_size)
     else:
         tokenizer.add_tokens(list(all_chars))
 

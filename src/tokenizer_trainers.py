@@ -11,6 +11,7 @@ from random import randint
 import fire
 import pyrootutils
 from accelerate.utils import set_seed
+from character_tokenizer import SpecialTokens
 from datasets import Dataset
 from tokenizers import Tokenizer
 from tokenizers.decoders import ByteLevel as ByteLevelDecoder
@@ -22,7 +23,7 @@ from tokenizers.processors import TemplateProcessing
 from tokenizers.trainers import BpeTrainer
 from transformers import PreTrainedTokenizerFast
 
-from data import SpecialTokens, load_data
+from data import load_data
 
 PROJECT_ROOT = path = pyrootutils.find_root(
     search_from=__file__, indicator=".project-root"
@@ -45,8 +46,8 @@ class TokenizerTrainer(ABC):
             mask_token=SpecialTokens.MASK,
             sep_token=SpecialTokens.SEP,
             cls_token=SpecialTokens.CLS,
+            padding_side="left",
         )
-        tokenizer.padding_side = "left"
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
         return tokenizer
@@ -110,12 +111,15 @@ class BPETokenizerTrainer(TokenizerTrainer):
         self._tokenizer_base.train_from_iterator(dataset, trainer, length=len(dataset))
 
 
-def get_desired_vocab_size(step: int, initial_alphabet: list[str]):
+def get_desired_vocab_size(step: int, initial_alphabet: list[str], max_vocab_size: int):
     """Gets the desired vocab size at this step.
     Minimally, the vocab size should be the same size as initial_alphabet.
     """
     # TODO: Make this more sensible
-    return int(exp(step + 1) + len(initial_alphabet))
+    return max(
+        min(int(exp(step + 1) + len(initial_alphabet)), max_vocab_size),
+        len(initial_alphabet),
+    )
 
 
 def main(
@@ -176,25 +180,6 @@ def main(
             steps[-1] = (0, len(dataset))
         else:
             steps = list(pairwise(end_points))
-            # <<<<<<< fixes
-            #             steps.append((end_points[-1], len(dataset)))
-            #         desired_vocab_sizes = [
-            #             get_desired_vocab_size(i, initial_alphabet) for i in range(len(steps))  # noqa E501
-            #         ]
-            #     else:  # not incremental; just do one step
-            #         steps = [(0, len(dataset))]
-            #         desired_vocab_sizes = [
-            #             vocab_size,
-            #         ]
-
-            #     for (s, e), v in zip(steps, desired_vocab_sizes):
-            #         print(f"Start: {s}, End: {e}, Vocab Size: {v}")
-
-            #     for i, ((s, e), desired_vocab_size) in enumerate(zip(steps, desired_vocab_sizes)):  # noqa E501
-            #         trainer = BPETokenizerTrainer(
-            #             vocab_size=desired_vocab_size, min_frequency=min_frequency
-            #         )
-            # =======
             steps[-1] = (end_points[-2], len(dataset))
         desired_vocab_sizes = [
             get_desired_vocab_size(i, initial_alphabet) for i in range(len(steps))
@@ -212,18 +197,10 @@ def main(
             min_frequency=min_frequency,
             split_on_space=split_on_space,
         )
-        # >>>>>>> main
 
         trainer.train(dataset=dataset["text"][s:e], initial_alphabet=previous_alphabet)
-        trainer.tokenizer_base().save(str(project_dir / f"tokenizer_{i}.json"))
+        trainer.tokenizer_base().save(str(project_dir / f"{i}-tokenizer.json"))
         previous_alphabet = list(trainer.tokenizer_base().get_vocab().keys())
-
-    # tokenizer = trainer.get_tokenizer()
-    # encoded = tokenizer.encode("This is a full sentence with longlonglong words that
-    #  are sesquepedalian.")
-    # print(encoded)
-    # print(tokenizer.convert_ids_to_tokens(encoded, skip_special_tokens=False))
-    # print(tokenizer.decode(encoded))
 
 
 if __name__ == "__main__":

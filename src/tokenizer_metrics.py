@@ -8,9 +8,9 @@ import pyrootutils
 import regex as re
 from numpy import isnan, zeros
 from scipy.stats import spearmanr
+from tokenizers import Tokenizer
 from tokenizers.decoders import ByteLevel
 from tokenizers.normalizers import NFD, Lowercase, Sequence, StripAccents
-from transformers import AutoTokenizer
 
 PROJECT_ROOT = path = pyrootutils.find_root(
     search_from=__file__, indicator=".project-root"
@@ -26,21 +26,21 @@ TEST_FILE = PROJECT_ROOT / "data/test/simple_wiki.test"
 
 def remove_tokenizer_formatting(s: str | list[str]) -> str | list[str]:
     # check if s is a list
-    old_s = s
+    # old_s = s
     if isinstance(s, list):
         formatted = [remove_tokenizer_formatting(x) for x in s]
         return [x for x in formatted if x is not None]
     if s[0] == "Ġ":
         return s[1:] if len(s) > 1 else None
-    print(f"{old_s} -> {s}")
-    raise SystemError
+    # print(f"{old_s} -> {s}")
+    # raise SystemError
     return s
 
 
 class SingleTokenizerMetric(ABC):
     """Metric for a single tokenizer."""
 
-    def __init__(self, tokenizer: AutoTokenizer) -> None:
+    def __init__(self, tokenizer: Tokenizer) -> None:
         self.tokenizer = tokenizer
 
     @abstractmethod
@@ -56,7 +56,7 @@ class SingleTokenizerMetric(ABC):
 class MultiTokenizerMetric(ABC):
     """Metric that compares n tokenizers."""
 
-    def __init__(self, tokenizers: list[AutoTokenizer]) -> None:
+    def __init__(self, tokenizers: list[Tokenizer]) -> None:
         self.tokenizers = tokenizers
         self.n = len(self.tokenizers)
 
@@ -67,7 +67,7 @@ class MultiTokenizerMetric(ABC):
 class AverageTokenLength(SingleTokenizerMetric):
     """Mean/median token length of all tokens in this tokenizer."""
 
-    def __init__(self, tokenizer: AutoTokenizer, metric: str | None = "mean") -> None:
+    def __init__(self, tokenizer: Tokenizer, metric: str | None = "mean") -> None:
         super().__init__(tokenizer)
         self.metric = metric if metric else "mean"
 
@@ -87,7 +87,7 @@ class AlignmentWithCDI(MultiTokenizerMetric):
     how aligned whole-word token acquisition is to human CDI rates."""
 
     def __init__(
-        self, tokenizers: list[AutoTokenizer], cdi_csv_file: str = AOA_FIT_FILE
+        self, tokenizers: list[Tokenizer], cdi_csv_file: str = AOA_FIT_FILE
     ) -> None:
         super().__init__(tokenizers)
         self.cdi_aoa = self.format_cdi_file(cdi_csv_file)
@@ -197,7 +197,7 @@ class AlignmentWithCDI(MultiTokenizerMetric):
 class TokenizerOverlap(MultiTokenizerMetric):
     """Degree of overlap between n tokenizers."""
 
-    def __init__(self, tokenizers: list[AutoTokenizer]) -> None:
+    def __init__(self, tokenizers: list[Tokenizer]) -> None:
         super().__init__(tokenizers)
 
     def calculate(self):
@@ -213,9 +213,7 @@ class CorrespondenceWithWords(SingleTokenizerMetric):
     """How many tokens in the tokenizer correspond to an English word.
     Using words from https://github.com/dwyl/english-words/blob/master/words_alpha.txt"""
 
-    def __init__(
-        self, tokenizer: AutoTokenizer, word_file: str = WORDLIST_FILE
-    ) -> None:
+    def __init__(self, tokenizer: Tokenizer, word_file: str = WORDLIST_FILE) -> None:
         super().__init__(tokenizer)
         self.word_list = self.get_words_from_file(word_file)
 
@@ -237,7 +235,7 @@ class CorrespondenceWithMorphemes(SingleTokenizerMetric):
 
     def __init__(
         self,
-        tokenizer: AutoTokenizer,
+        tokenizer: Tokenizer,
         morpheme_file: str = MORPHEME_FILE,
         word_file: str = WORDLIST_FILE,
     ) -> None:
@@ -260,7 +258,7 @@ class SplitsIntoMorphemes(SingleTokenizerMetric):
 
     def __init__(
         self,
-        tokenizer: AutoTokenizer,
+        tokenizer: Tokenizer,
         sigmorphon_dev: str = SIGMORPHON_DEV_FILE,
         metric: str | None = "count",
     ) -> None:
@@ -313,7 +311,9 @@ class SplitsIntoMorphemes(SingleTokenizerMetric):
         with open(sigmorphon_dev_file, "r") as f:
             for line in f:
                 word, morphs, _ = line.split("\t")
-                counts.append((word.strip(), morphs.replace("@@", "").split(" ")))
+                counts.append(
+                    (word.strip().lower(), morphs.replace("@@", "").lower().split(" "))
+                )
         return counts
 
 
@@ -323,7 +323,7 @@ class SplitsOnSpace(SingleTokenizerMetric):
 
     def __init__(
         self,
-        tokenizer: AutoTokenizer,
+        tokenizer: Tokenizer,
         baseline: str = "tokenized",
         test_file: str = TEST_FILE,
     ) -> None:
