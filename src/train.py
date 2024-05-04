@@ -69,6 +69,7 @@ def main(
     # Dataset Parameters
     large_track: bool = False,
     subsample: int | None = None,
+    stack_sequences: bool = True,
     # Miscellaneous
     output_dir: Path = PROJECT_ROOT / "outputs",
     seed: int = randint(0, 2**32 - 1),
@@ -97,6 +98,7 @@ def main(
         seed=seed,
         subsample=subsample,
         block_size=block_size,
+        stack=stack_sequences,
         tokenizer=None,
     )
 
@@ -129,6 +131,7 @@ def main(
         "project_dir": str(project_dir),
         "seed": seed,
         "subsample": subsample,
+        "stack_sequences": stack_sequences,
         "weight_decay": weight_decay,
         "update_vocab_every": update_vocab_every,
         "num_vocab_merges_per_step": num_vocab_merges_per_step,
@@ -139,7 +142,7 @@ def main(
         config=project_hps,
     )
 
-    # log.info(f"Config: {pformat(project_hps)}")
+    print(f"Config: {project_hps}")
     # log.info(f"Dataset: {dataset}")
 
     with open(project_dir / "project_hps.json", "w") as f:
@@ -196,12 +199,14 @@ def main(
     data_seeds = sample(range(1, 100), num_epochs)
 
     for e in range(num_epochs):
+        print("#####################################")
         print(f"Epoch: {e}")
+        print(f"{len(tokenizer)} tokens in tokenizer")
+        print("#####################################")
 
         data_collator = DataCollatorForLanguageModeling(
             tokenizer,
             mlm=False,
-            pad_to_multiple_of=block_size,
         )
 
         trainer = Trainer(
@@ -218,31 +223,31 @@ def main(
         total_merge_probs = total_merge_probs.to(device)
         total_merge_counts = total_merge_counts.to(device)
 
-        eval_dataloader = DataLoader(
-            dataset["validation"],
+        vocab_dataloader = DataLoader(
+            dataset["train"],
             shuffle=False,
             batch_size=per_device_batch_size,
             collate_fn=data_collator,
         )
-        eval_dataloader = accelerator.prepare(eval_dataloader)
+        vocab_dataloader = accelerator.prepare(vocab_dataloader)
 
         model.eval()
         with torch.no_grad():
             start = time.time()
-            for idx, e_batch in enumerate(eval_dataloader):
-                output = model(**e_batch)
-                target = e_batch["labels"]
+            for idx, v_batch in enumerate(vocab_dataloader):
+                output = model(**v_batch)
+                target = v_batch["labels"]
                 logits = output.logits
 
                 if idx == 0:
                     first_target = target[0]
                     first_target[first_target == -100] = tokenizer.eos_token_id
                     first_logits = logits[0].argmax(dim=-1)
-                    print("Eval batch:")
+                    print("Vocab batch:")
                     print(f"Target: {tokenizer.decode(
-                        first_target, skip_special_tokens=False)}")
+                        first_target, skip_special_tokens=not stack_sequences)}")
                     print(f"Prediction: {tokenizer.decode(
-                        first_logits, skip_special_tokens=False)}")
+                        first_logits, skip_special_tokens=not stack_sequences)}")
 
                 if update_vocab:
                     target = target.flatten()
@@ -282,6 +287,7 @@ def main(
                     subsample=subsample,
                     block_size=block_size,
                     tokenizer=tokenizer,
+                    stack=stack_sequences,
                 )
                 dataset = dataset_dict["dataset"]
 

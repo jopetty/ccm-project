@@ -15,6 +15,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
 from tokenizers.processors import TemplateProcessing
 from transformers import PreTrainedTokenizerFast
+from unidecode import unidecode
 
 PROJECT_ROOT = path = pyrootutils.find_root(
     search_from=__file__, indicator=".project-root"
@@ -68,17 +69,22 @@ class OSFArgs:
 
 
 def preprocess(
-    examples: DatasetDict, tokenizer: PreTrainedTokenizerFast
+    examples: DatasetDict,
+    tokenizer: PreTrainedTokenizerFast,
+    trunc: bool = True,
+    max_len: int = 512,
 ) -> DatasetDict:
     """Tokenize dataset."""
-    # print([x.lower() for x in examples["text"]])
-    # raise SystemExit
-    return tokenizer(
-        [x.lower() for x in examples["text"]]
-        # padding=True,
-        # truncation=True,
-        # max_length=512,
-    )
+    if trunc:
+        return tokenizer(
+            [unidecode(x).lower() for x in examples["text"]],
+            truncation=trunc,
+            max_length=512,
+        )
+    else:
+        return tokenizer(
+            [unidecode(x).lower() for x in examples["text"]],
+        )
 
 
 def stack_sequences(examples: DatasetDict, block_size: int):
@@ -117,7 +123,7 @@ def get_chars(example: Dataset) -> set:
     codepoints = set()
     text = example["text"]
     for char in text:
-        codepoints.add(char)
+        codepoints.add(unidecode(char).lower())
     return codepoints
 
 
@@ -189,6 +195,17 @@ def get_initial_tokenizer(unique_tokens: set[str]):
         sep_token=SpecialTokens.SEP,
         cls_token=SpecialTokens.CLS,
     )
+    tokenizer.add_special_tokens(
+        {
+            "pad_token": SpecialTokens.EOS,
+            "mask_token": SpecialTokens.MASK,
+            "sep_token": SpecialTokens.SEP,
+            "cls_token": SpecialTokens.CLS,
+            "unk_token": SpecialTokens.UNK,
+            "bos_token": SpecialTokens.BOS,
+            "eos_token": SpecialTokens.EOS,
+        }
+    )
     tokenizer.padding_side = "left"
     tokenizer.pad_token_id = tokenizer.eos_token_id
 
@@ -256,6 +273,7 @@ def construct_dataset(
     block_size: int,
     large_track: bool,
     subsample: int | None,
+    stack: bool,
     tokenizer: PreTrainedTokenizerFast | None,
 ):
     """Construct BabyLM dataset and initial tokenizer."""
@@ -272,7 +290,11 @@ def construct_dataset(
     else:
         tokenizer.add_tokens(list(all_chars))
 
-    preprocess_fn = partial(preprocess, tokenizer=tokenizer)
+    # print(tokenizer)
+
+    preprocess_fn = partial(
+        preprocess, tokenizer=tokenizer, trunc=not stack, max_len=block_size
+    )
     dataset = dataset.map(
         preprocess_fn,
         batched=True,
@@ -280,12 +302,13 @@ def construct_dataset(
         remove_columns=dataset["train"].column_names,
     )
 
-    stack_fn = partial(stack_sequences, block_size=block_size)
-    dataset = dataset.map(
-        stack_fn,
-        batched=True,
-        num_proc=os.cpu_count(),
-    )
+    if stack:
+        stack_fn = partial(stack_sequences, block_size=block_size)
+        dataset = dataset.map(
+            stack_fn,
+            batched=True,
+            num_proc=os.cpu_count(),
+        )
 
     return {
         "dataset": dataset,
