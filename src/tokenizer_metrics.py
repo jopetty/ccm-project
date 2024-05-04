@@ -26,11 +26,14 @@ TEST_FILE = PROJECT_ROOT / "data/test/simple_wiki.test"
 
 def remove_tokenizer_formatting(s: str | list[str]) -> str | list[str]:
     # check if s is a list
+    old_s = s
     if isinstance(s, list):
         formatted = [remove_tokenizer_formatting(x) for x in s]
         return [x for x in formatted if x is not None]
     if s[0] == "Ġ":
         return s[1:] if len(s) > 1 else None
+    print(f"{old_s} -> {s}")
+    raise SystemError
     return s
 
 
@@ -107,6 +110,9 @@ class AlignmentWithCDI(MultiTokenizerMetric):
                 "/"
             ):  # split on multiple expressions, e.g. "owie/boo boo"
                 aoa_dict[expression] = aoa
+
+        # lowercase all keys in aoa_dict
+        aoa_dict = {k.lower(): v for k, v in aoa_dict.items()}
         return aoa_dict
 
     def get_aoas(self) -> list[dict[str, (int, int)], list[str]]:

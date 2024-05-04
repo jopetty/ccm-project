@@ -6,9 +6,11 @@ from itertools import pairwise
 from math import exp
 from pathlib import Path
 from pprint import pformat
+from random import randint
 
 import fire
 import pyrootutils
+from accelerate.utils import set_seed
 from datasets import Dataset
 from tokenizers import Tokenizer
 from tokenizers.decoders import ByteLevel as ByteLevelDecoder
@@ -122,14 +124,16 @@ def main(
     incremental: bool | None = False,
     retrain: bool = True,
     split_on_space: bool = True,  # whether to split on space + punctuation, or not
-    output_dir: Path = PROJECT_ROOT / "outputs",
+    output_dir: Path = PROJECT_ROOT / "outputs" / "bpe-tokenizers",
     vocab_size: int = 30000,
     min_frequency: int | None = 15,
     bpe_batches: int | None = 10,
     # Data Parameters
     large_track: bool = False,
     subsample: int | None = None,
+    seed: int = randint(0, 2**32 - 1),
 ):
+    set_seed(seed)
     # create project directory inside output_dir based on the timestamp
     # plus a two-character random string
     project_dir = (
@@ -141,7 +145,7 @@ def main(
     if not project_dir.exists():
         project_dir.mkdir()
 
-    data = load_data(large_track=large_track, subsample=subsample)
+    data = load_data(large_track=large_track, subsample=subsample, seed=seed)
     dataset = data["dataset"]["train"]
     all_chars = data["all_chars"]
 

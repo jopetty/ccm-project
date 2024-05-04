@@ -180,10 +180,6 @@ def load_data(large_track: bool, subsample: int | None, seed: int) -> dict:
         }
 
     dataset = load_dataset("text", data_files=data_files)
-
-    print(dataset)
-    raise SystemExit
-
     if subsample is not None:
         dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample))
         dataset["validation"] = (
