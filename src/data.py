@@ -1,8 +1,10 @@
 """Construct BabyLM Dataset and initial tokenizer."""
 
 import os
+import re
+import unicodedata
 import zipfile
-from functools import partial
+from functools import partial, reduce
 from multiprocessing import Pool
 
 import pyrootutils
@@ -40,6 +42,25 @@ class OSFArgs:
         self.update = True
 
 
+def normalize_string(s: str) -> str:
+    """Normalize a string."""
+
+    def strip_accents(s: str) -> str:
+        return "".join(
+            c for c in unicodedata.normalize("NFD", s) if not unicodedata.combining(c)
+        )
+
+    def lower(s: str) -> str:
+        return s.lower()
+
+    def collapse_spaces(s: str) -> str:
+        return re.sub(r"\s+", " ", s)
+
+    norm_maps = [strip_accents, lower, unidecode, collapse_spaces]
+
+    return reduce(lambda x, f: f(x), norm_maps, s)
+
+
 def preprocess(
     examples: DatasetDict,
     tokenizer: PreTrainedTokenizerFast,
@@ -49,13 +70,13 @@ def preprocess(
     """Tokenize dataset."""
     if trunc:
         return tokenizer(
-            [unidecode(x).lower() for x in examples["text"]],
+            [normalize_string(x) for x in examples["text"]],
             truncation=trunc,
-            max_length=512,
+            max_length=max_len,
         )
     else:
         return tokenizer(
-            [unidecode(x).lower() for x in examples["text"]],
+            [normalize_string(x) for x in examples["text"]],
         )
 
 
@@ -129,9 +150,9 @@ def download_data():
 def get_chars(example: Dataset) -> set:
     """Get all characters in dataset."""
     codepoints = set()
-    text = example["text"]
-    for char in text:
-        codepoints.add(unidecode(char).lower())
+    normalized_input = normalize_string(example["text"])
+    for char in normalized_input:
+        codepoints.add(normalize_string(char))
     return codepoints
 
 
@@ -158,7 +179,7 @@ def load_data(large_track: bool, subsample: int | None, seed: int) -> dict:
         )
         dataset["test"] = dataset["test"].shuffle(seed=seed).select(range(subsample))
 
-    num_workers = 8
+    num_workers = os.cpu_count()
     pool = Pool(processes=num_workers)
 
     train_chars = pool.map(get_chars, dataset["train"])
@@ -248,9 +269,35 @@ def construct_dataset(
     if tokenizer is None:
         tokenizer = CharacterTokenizer(all_chars, model_max_length=block_size)
     else:
-        tokenizer.add_tokens(list(all_chars))
+        """
+        If we already have a tokenzer, we want to construct an entirely new
+        tokenizer with the union of the old vocab and the new characters from
+        the dataset. However, we need to maintain the order of the old vocabulary
+        since otherwise the model will be seeing randomized tokens at every epoch.
 
-    # print(tokenizer)
+        To do this, we first strip out the special tokens from the old vocabulary.
+        Then we take the current vocab and make sure that it's ordered according to
+        it's token_id. We then remove these known tokens from the new characters,
+        and concatenate current_vocab with new_vocab.
+        """
+        current_specials = tokenizer.all_special_tokens
+        current_vocab = tokenizer.get_vocab()
+        current_vocab = dict(sorted(current_vocab.items(), key=lambda x: x[1]))
+        normal_vocab = {
+            k: v for k, v in current_vocab.items() if k not in current_specials
+        }
+
+        # print(current_vocab)
+        # print(normal_vocab)
+
+        new_chars = list(set(all_chars) - set(normal_vocab.keys()))
+
+        # print(new_chars)
+        new_chars = [k for k in normal_vocab] + new_chars
+
+        # print(new_chars)
+        # raise SystemExit
+        tokenizer = CharacterTokenizer(new_chars, model_max_length=block_size)
 
     preprocess_fn = partial(
         preprocess, tokenizer=tokenizer, trunc=not stack, max_len=block_size

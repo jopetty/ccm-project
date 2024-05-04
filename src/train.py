@@ -289,7 +289,17 @@ def main(
                     tokenizer=tokenizer,
                     stack=stack_sequences,
                 )
+                old_vocab = tokenizer.get_vocab()
                 dataset = dataset_dict["dataset"]
+                tokenizer = dataset_dict["tokenizer"]
+                new_vocab = tokenizer.get_vocab()
+
+                omn = list(set(old_vocab.keys()) - set(new_vocab.keys()))
+                nmo = list(set(new_vocab.keys()) - set(old_vocab.keys()))
+
+                print(omn, nmo)
+
+                # raise SystemExit
 
                 # Pad total_merge_probs, total_merge_counts to match new tokenizer size
                 new_len = len(tokenizer)

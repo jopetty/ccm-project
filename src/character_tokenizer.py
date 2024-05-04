@@ -13,8 +13,6 @@ from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.processors import TemplateProcessing
 from transformers import PreTrainedTokenizerFast
 
-# from transformers.tokenization_utils import AddedToken, PreTrainedTokenizer
-
 
 class SpecialTokens(StrEnum):
     """Special tokens for tokenizer."""
@@ -24,7 +22,6 @@ class SpecialTokens(StrEnum):
     EOS = "[EOS]"
     SEP = "[SEP]"
     CLS = "[CLS]"
-    PAD = "[PAD]"
     MASK = "[MASK]"
 
     @classmethod
@@ -35,7 +32,11 @@ class SpecialTokens(StrEnum):
     @classmethod
     def as_dict(cls):
         """Return the special token as a dictionary."""
-        return {v: i for i, v in enumerate(cls.values())}
+        return dict(
+            sorted(
+                {v: i for i, v in enumerate(cls.values())}.items(), key=lambda x: x[1]
+            )
+        )
 
     @property
     def index(self):
@@ -52,7 +53,9 @@ class CharacterTokenizer(PreTrainedTokenizerFast):
 
         Args:
             characters (Sequence[str]): List of desired characters. Any character which
-                is not included in this list will be replaced by [UNK].
+                is not included in this list will be replaced by [UNK]. These order in
+                which these characters are provided will be the order in which they are
+                indexed in the vocabulary!
 
             model_max_length (int): Model maximum sequence length.
         """

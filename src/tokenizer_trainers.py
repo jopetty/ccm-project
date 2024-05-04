@@ -149,6 +149,9 @@ def main(
     if not project_dir.exists():
         project_dir.mkdir()
 
+    if subsample is not None:
+        subsample *= bpe_batches
+
     data = load_data(large_track=large_track, subsample=subsample, seed=seed)
     dataset = data["dataset"]["train"]
     all_chars = data["all_chars"]
@@ -182,7 +185,8 @@ def main(
             steps = list(pairwise(end_points))
             steps[-1] = (end_points[-2], len(dataset))
         desired_vocab_sizes = [
-            get_desired_vocab_size(i, initial_alphabet) for i in range(len(steps))
+            get_desired_vocab_size(i, initial_alphabet, vocab_size)
+            for i in range(len(steps))
         ]
     else:  # not incremental; just do one step
         steps = [(0, len(dataset))]
@@ -198,7 +202,16 @@ def main(
             split_on_space=split_on_space,
         )
 
-        trainer.train(dataset=dataset["text"][s:e], initial_alphabet=previous_alphabet)
+        # if subsample is not None:
+        #     train_data = dataset=dataset["text"][s:e]
+        #     print(train_data)
+        #     train_data = train_data.select(range(subsample))
+        #     print(train_data)
+        #     raise SystemExit
+
+        train_data = dataset["text"][s:e]
+
+        trainer.train(dataset=train_data, initial_alphabet=previous_alphabet)
         trainer.tokenizer_base().save(str(project_dir / f"{i}-tokenizer.json"))
         previous_alphabet = list(trainer.tokenizer_base().get_vocab().keys())
 
