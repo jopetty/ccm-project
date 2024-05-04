@@ -6,11 +6,20 @@ from statistics import mean, median
 import pyrootutils
 from scipy.stats import spearmanr
 from transformers import AutoTokenizer
+from tokenizers.normalizers import Sequence, NFD, StripAccents, Lowercase
+from tokenizers.decoders import ByteLevel
 
 
 PROJECT_ROOT = path = pyrootutils.find_root(
     search_from=__file__, indicator=".project-root"
 )
+
+
+WORDLIST_FILE = PROJECT_ROOT / "data/references/wordlist.txt"
+MORPHEME_FILE = PROJECT_ROOT / "data/references/sigmorphon_morphemes.txt"
+AOA_FIT_FILE = PROJECT_ROOT / "data/references/aoa_ws_fit.csv"
+SIGMORPHON_DEV_FILE = PROJECT_ROOT / "data/references/sigmorphon_dev.tsv"
+TEST_FILE = PROJECT_ROOT / "data/test/simple_wiki.test"
 
 
 def remove_tokenizer_formatting(s: str|list[str]) -> str|list[str]:
@@ -20,12 +29,6 @@ def remove_tokenizer_formatting(s: str|list[str]) -> str|list[str]:
     if s[0] == "Ġ":
         return s[1:] if len(s) > 1 else None
     return s
-
-
-WORDLIST_FILE = PROJECT_ROOT / "data/references/wordlist.txt"
-MORPHEME_FILE = PROJECT_ROOT / "data/references/sigmorphon_morphemes.txt"
-AOA_FIT_FILE = PROJECT_ROOT / "data/references/aoa_ws_fit.csv"
-SIGMORPHON_DEV_FILE = PROJECT_ROOT / "data/references/sigmorphon_dev.tsv"
 
 
 class SingleTokenizerMetric(ABC):
@@ -219,3 +222,147 @@ class SplitsIntoMorphemes(SingleTokenizerMetric):
                 word, morphs, _ = line.split("\t")
                 counts.append((word.strip(), morphs.replace("@@","").split(" ")))
         return counts
+    
+
+class SplitsOnSpace(SingleTokenizerMetric):
+    """Whether a tokenizer trained without spaces create tokenizations that coincide with word boundaries
+    on a test set."""
+    def __init__(self, tokenizer: AutoTokenizer, baseline: str="tokenized", test_file: str=TEST_FILE) -> None:
+        super().__init__(tokenizer)
+        self.test_sentences = self.read_text_file(test_file)
+        self.normalizer = Sequence([NFD(), StripAccents(), Lowercase()])
+        self.baseline = baseline
+        self.pretokenizer = ByteLevel(add_prefix_space=False, use_regex=False)
+
+    def calculate(self) -> float:
+        def replace_bytes(str):
+            str = str.replace("Ģĵ", "–")
+            str = str.replace("â|ģ|Ħ", "⁄")
+            str = str.replace("âĢ|ĭ", "")
+            str = str.replace("âĢİ", "")
+            str = str.replace("âĢ|Ń", "")
+            str = str.replace("Ã¸", "ø")
+            str = str.replace("âĢķ", "―")
+            str = str.replace("Â|«", "«")    
+            str = str.replace("ï¿½", "�")
+            str = str.replace("Ģ²", "′")
+            str = str.replace("ĢĻ", "’")
+            str = str.replace("âĢ|ŀ", "„")
+            str = str.replace("±", "ı")
+            str = str.replace("ĢĶ", "—")
+            str = str.replace("Ģľ", "“")
+            str = str.replace("ß", "z-")
+            str = str.replace("Ł", "ß")
+            str = str.replace("Ģŀ", "„")
+            str = str.replace("ĢĿ", "”")
+            str = str.replace("Ã¦", "æ")
+            str = str.replace("Ê|»", "ʻ")
+            str = str.replace("Ģĺ", "‘")
+            str = str.replace("Ī", "−1")
+            str = str.replace("Å|ĵ", "œ")
+            str = str.replace("Ģĺ", "‘")
+            str = str.replace("−1|Ĵ", "−")
+            str = str.replace("â–","–")
+            str = str.replace("â′","′")
+            str = str.replace("â′","′")
+            str = str.replace("Â°","°")
+            str = str.replace("â’","’")
+            str = str.replace("Ä|ı","ı")
+            str = str.replace("Äı","ı")
+            str = str.replace("â“","“")
+            str = str.replace("Ã|ß","ß")
+            str = str.replace("Ãß","ß")
+            str = str.replace("â—","—")
+            str = str.replace("Â£","£")
+            str = str.replace("â“","“")
+            str = str.replace("Â|ı","±")
+            str = str.replace("Âı","±")
+            str = str.replace("Ê|¿","ʿ")
+            str = str.replace("Ê¿","ʿ")
+            str = str.replace("â”","”")
+            str = str.replace("â|−","−")
+            str = str.replace("â‘","‘")
+            str = str.replace("Ë|Ĳ","ː")
+            str = str.replace("Ç|ĥ","ǃ")
+            str = str.replace("Ã|Ĺ","×")
+            str = str.replace("Ä|§","ħ")
+            str = str.replace("âĻ|¯","♯")
+            str = str.replace("Â|¥","¥")
+            str = str.replace("Â|·","·")
+            str = str.replace("â|Ĥ|¬","€")
+            str = str.replace("Ã|¾","þ")
+            str = str.replace("Ä|ĳ","đ")
+            str = str.replace("Ä|ĳ","")
+            str = str.replace("Ã|°","ð")
+            str = str.replace("âĢ|ļ","‚")
+            str = str.replace("ÅĤ","ł")
+            str = str.replace("−1|ĥ","∃")
+            str = str.replace("−1|Ģ","∀")
+            str = str.replace("Â|§","§")
+            str = str.replace("ã|Ģ|ģ","、")
+            str = str.replace("â|ĭ|¯","⋯")
+            str = str.replace("â|Ĭ|Ĩ","⊆")
+            str = str.replace("âĢ|ł","†")
+            str = str.replace("|É|Ľ|","ɛ")
+            str = str.replace("Â|»","»")
+            str = str.replace("â|Ĥ|¤","₤")
+            str = str.replace("Â|®","®")
+            str = str.replace("−1|ŀ","∞")
+            str = str.replace("É|Ļ","ə")
+            str = str.replace("Â|Ń","")
+            str = str.replace("Ã|·","÷")
+            str = str.replace("âĢ|Ĳ","‐")
+            str = str.replace("âĢ¢","•")
+            str = str.replace("|âĢ|¬|","")
+            str = str.replace("à|¥","।")
+            str = str.replace("ã|ĥ","ー")
+            str = str.replace("ã|ĥ","・")
+            str = str.replace("|âĢ|¬|","")
+
+            return str
+
+        spaces_kept = 0
+        total_spaces = 0
+        for line in self.test_sentences:
+            tokenized_line = remove_tokenizer_formatting(self.tokenizer.encode(line, add_special_tokens=False).tokens)
+            tokenized = "|".join(tokenized_line).strip()
+            tokenized = replace_bytes(tokenized)
+            space_split = re.sub(r"\s+", '|', self.normalizer.normalize_str(line)).strip()
+            if self.baseline == "gold":
+                kept, total = self.check_spaces(tokenized, space_split)
+            elif self.baseline == "tokenized":
+                kept, total = self.check_spaces(space_split, tokenized)
+            spaces_kept += kept
+            total_spaces += total
+        return spaces_kept * 1.0 / total_spaces
+
+    def read_text_file(self, text_file):
+        with open(text_file, 'r') as f:
+            lines = f.readlines()
+            return [line.strip() for line in lines]
+
+    def check_spaces(self, test: str, baseline: str) -> list[int, int]:
+        i = 0
+        j = 0
+        kept = 0
+        total = 0
+        while i < len(baseline) and j < len(test):
+            if baseline[i] == "|":
+                total +=1
+                i += 1
+                if test[j] == "|":
+                    kept += 1 
+                    j += 1
+            elif baseline[i] == test[j]:
+                i += 1
+                j += 1
+            elif test[j] == "|":
+                j += 1
+            elif baseline[i] == "":
+                i += 1
+            else:
+                # TODO: Currently we just break if the BPE decoding is too weird. Fix if possible.
+                print(baseline[:i])
+                print(test[:j])
+                break
+        return [kept, total]
