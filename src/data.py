@@ -263,28 +263,19 @@ def merge_new_tokens(
     unigram_probs = total_merge_probs.sum(axis=0) / total_merge_counts.sum(axis=0)
     merge_scores = bigram_probs / unigram_probs  # P(wi|wi-1)/ P(wi)
     merge_scores = torch.nan_to_num(merge_scores)
-
+    merge_scores *= prev_merged
     # get top num_to_merge valid token pairs
     merge_scores_ranked = merge_scores.flatten().argsort(descending=True)
-    merge_scores_ranked = (
+    merge_scores_ranked = torch.stack((
         merge_scores_ranked // merge_scores.shape[0],
         merge_scores_ranked % merge_scores.shape[0],
-    )
-    top_alphas = [
-        (merge_scores_ranked[0][x].item(), merge_scores_ranked[1][x].item())
-        for x in range(len(merge_scores_ranked[0]))
-        if (merge_scores_ranked[0][x].item() in alpha_toks)
-        and (merge_scores_ranked[1][x].item() in alpha_toks)
-        and (
-            (merge_scores_ranked[0][x].item(), merge_scores_ranked[1][x].item())
-            not in prev_merged
-        )
-    ][:num_to_merge]
-    new_toks = [tokenizer.decode(x) + tokenizer.decode(y) for x, y in top_alphas]
+    ))
+    top_alphas = merge_scores_ranked[:,:num_to_merge]
+    new_toks = [tokenizer.decode(merge_scores_ranked[0,x]) + tokenizer.decode(merge_scores_ranked[1,x]) for x in range(top_alphas.shape[1])]
 
     # update counters
-    alpha_toks.update(range(len(tokenizer), len(tokenizer) + len(new_toks)))
-    prev_merged.update(top_alphas)
+    alpha_toks = torch.cat((alpha_toks, torch.arange(len(tokenizer), len(tokenizer) + len(new_toks), device=model.device)))
+    prev_merged[top_alphas] = False
 
     # add tokens to tokenizer
     tokenizer.add_tokens(new_toks)
@@ -295,12 +286,12 @@ def merge_new_tokens(
     # new tokens rather than resizing each time.
     model.resize_token_embeddings(len(tokenizer))
     model_embs = model.get_input_embeddings()
-    new_embs = model_embs.weight[top_alphas].mean(axis=1)
+    new_embs = model_embs.weight[top_alphas].mean(axis=0)
     model_embs.weight[len(tokenizer) - len(new_toks) :] = new_embs
     model.set_input_embeddings(model_embs)
     model.tie_weights()
     print("Newly added tokens", new_toks)
-    return tokenizer, model, alpha_toks
+    return tokenizer, model, alpha_toks, prev_merged
 
 
 def construct_dataset(
