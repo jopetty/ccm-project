@@ -8,6 +8,7 @@ from multiprocessing import Pool
 import requests
 
 import pyrootutils
+import torch
 from datasets import Dataset, DatasetDict, load_dataset
 from osfclient import cli
 from tokenizers import Tokenizer
@@ -15,8 +16,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
 from tokenizers.processors import TemplateProcessing
 from transformers import PreTrainedTokenizerFast
-
-import torch
+from unidecode import unidecode
 
 PROJECT_ROOT = path = pyrootutils.find_root(
     search_from=__file__, indicator=".project-root"
@@ -31,6 +31,7 @@ class SpecialTokens(StrEnum):
     EOS = "[EOS]"
     SEP = "[SEP]"
     CLS = "[CLS]"
+    PAD = "[PAD]"
     MASK = "[MASK]"
 
     @classmethod
@@ -68,33 +69,33 @@ class OSFArgs:
         self.update = True
 
 
-def tokenize(examples: DatasetDict, tokenizer: PreTrainedTokenizerFast) -> DatasetDict:
+def preprocess(
+    examples: DatasetDict,
+    tokenizer: PreTrainedTokenizerFast,
+    trunc: bool = True,
+    max_len: int = 512,
+) -> DatasetDict:
     """Tokenize dataset."""
-    return tokenizer(
-        examples["text"],
-        padding="max_length",
-        max_length=512,
-        truncation=True,
-        return_tensors="pt",
-    )
+    if trunc:
+        return tokenizer(
+            [unidecode(x).lower() for x in examples["text"]],
+            truncation=trunc,
+            max_length=512,
+        )
+    else:
+        return tokenizer(
+            [unidecode(x).lower() for x in examples["text"]],
+        )
 
 
-def stack_sequences(examples: DatasetDict, block_size: int | None = None):
+def stack_sequences(examples: DatasetDict, block_size: int):
     """Sequence stacking."""
-    if block_size is None:
-        examples["labels"] = examples["input_ids"].copy()
-        return examples
-
     concatenated_examples = {k: sum(examples[k], []) for k in examples.keys()}
     total_length = len(concatenated_examples[list(examples.keys())[0]])
-    if total_length >= block_size:
-        total_length = (total_length // block_size) * block_size
     result = {
         k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
         for k, t in concatenated_examples.items()
     }
-    result["labels"] = result["input_ids"].copy()
-
     return result
 
 
@@ -157,11 +158,11 @@ def get_chars(example: Dataset) -> set:
     codepoints = set()
     text = example["text"]
     for char in text:
-        codepoints.add(char)
+        codepoints.add(unidecode(char).lower())
     return codepoints
 
 
-def load_data(large_track: bool, subsample: int | None) -> dict:
+def load_data(large_track: bool, subsample: int | None, seed: int) -> dict:
     """Load BabyLM data into HF dataset object."""
     if large_track:
         data_files = {
@@ -179,11 +180,11 @@ def load_data(large_track: bool, subsample: int | None) -> dict:
     dataset = load_dataset("text", data_files=data_files)
 
     if subsample is not None:
-        dataset["train"] = dataset["train"].select(range(subsample))
-        dataset["validation"] = dataset["validation"].select(range(subsample))
-        dataset["test"] = dataset["test"].select(range(subsample))
-
-    print(dataset)
+        dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample))
+        dataset["validation"] = (
+            dataset["validation"].shuffle(seed=seed).select(range(subsample))
+        )
+        dataset["test"] = dataset["test"].shuffle(seed=seed).select(range(subsample))
 
     num_workers = 8
     pool = Pool(processes=num_workers)
@@ -201,16 +202,21 @@ def load_data(large_track: bool, subsample: int | None) -> dict:
 
 def get_initial_tokenizer(unique_tokens: set[str]):
     """Get char-level tokenizer."""
-    tokenizer_base = Tokenizer(WordLevel())
+    tokenizer_base = Tokenizer(WordLevel(unk_token=SpecialTokens.UNK))
+    # tokenizer_base.normalizer = normalizers.Sequence([
+    #     NFD(),
+    #     StripAccents(),
+    #     Lowercase()
+    # ])
+
     tokenizer_base.pre_tokenizer = WhitespaceSplit()
     tokenizer_base.add_special_tokens(SpecialTokens.values())
     tokenizer_base.add_tokens(list(unique_tokens))
 
     tokenizer_base.post_processor = TemplateProcessing(
-        single=f"{SpecialTokens.BOS} $A {SpecialTokens.EOS}",
+        single=f"{SpecialTokens.BOS} $A",
         special_tokens=[
             (SpecialTokens.BOS, tokenizer_base.token_to_id(SpecialTokens.BOS)),
-            (SpecialTokens.EOS, tokenizer_base.token_to_id(SpecialTokens.EOS)),
         ],
     )
 
@@ -224,74 +230,120 @@ def get_initial_tokenizer(unique_tokens: set[str]):
         sep_token=SpecialTokens.SEP,
         cls_token=SpecialTokens.CLS,
     )
+    tokenizer.add_special_tokens(
+        {
+            "pad_token": SpecialTokens.EOS,
+            "mask_token": SpecialTokens.MASK,
+            "sep_token": SpecialTokens.SEP,
+            "cls_token": SpecialTokens.CLS,
+            "unk_token": SpecialTokens.UNK,
+            "bos_token": SpecialTokens.BOS,
+            "eos_token": SpecialTokens.EOS,
+        }
+    )
     tokenizer.padding_side = "left"
     tokenizer.pad_token_id = tokenizer.eos_token_id
 
     return tokenizer
 
-def merge_new_tokens(total_merge_probs, total_merge_counts, num_to_merge, tokenizer, model, alpha_toks, prev_merged):
-    #compute merge score - ratio of bigram conditional to unigram probability of a token
+
+def merge_new_tokens(
+    total_merge_probs,
+    total_merge_counts,
+    num_to_merge,
+    tokenizer,
+    model,
+    alpha_toks,
+    prev_merged,
+):
+    """Merges tokens based on merge scores."""
+    # compute merge score - ratio of bigram conditional to
+    # unigram probability of a token
     bigram_probs = total_merge_probs / total_merge_counts
     unigram_probs = total_merge_probs.sum(axis=0) / total_merge_counts.sum(axis=0)
-    merge_scores = bigram_probs / unigram_probs #P(wi|wi-1)/ P(wi)
+    merge_scores = bigram_probs / unigram_probs  # P(wi|wi-1)/ P(wi)
     merge_scores = torch.nan_to_num(merge_scores)
 
-    #get top num_to_merge valid token pairs
+    # get top num_to_merge valid token pairs
     merge_scores_ranked = merge_scores.flatten().argsort(descending=True)
-    merge_scores_ranked = (merge_scores_ranked // merge_scores.shape[0], merge_scores_ranked % merge_scores.shape[0])
-    top_alphas = [(merge_scores_ranked[0][x].item(), merge_scores_ranked[1][x].item()) for x in range(len(merge_scores_ranked[0])) if (merge_scores_ranked[0][x].item() in alpha_toks) and (merge_scores_ranked[1][x].item() in alpha_toks) and ((merge_scores_ranked[0][x].item(), merge_scores_ranked[1][x].item()) not in prev_merged)][:num_to_merge]
-    new_toks = [tokenizer.decode(x) + tokenizer.decode(y) for x,y in top_alphas]
-    
-    #update counters
-    alpha_toks.update(range(len(tokenizer), len(tokenizer)+len(new_toks)))
+    merge_scores_ranked = (
+        merge_scores_ranked // merge_scores.shape[0],
+        merge_scores_ranked % merge_scores.shape[0],
+    )
+    top_alphas = [
+        (merge_scores_ranked[0][x].item(), merge_scores_ranked[1][x].item())
+        for x in range(len(merge_scores_ranked[0]))
+        if (merge_scores_ranked[0][x].item() in alpha_toks)
+        and (merge_scores_ranked[1][x].item() in alpha_toks)
+        and (
+            (merge_scores_ranked[0][x].item(), merge_scores_ranked[1][x].item())
+            not in prev_merged
+        )
+    ][:num_to_merge]
+    new_toks = [tokenizer.decode(x) + tokenizer.decode(y) for x, y in top_alphas]
+
+    # update counters
+    alpha_toks.update(range(len(tokenizer), len(tokenizer) + len(new_toks)))
     prev_merged.update(top_alphas)
 
-    #add tokens to tokenizer
+    # add tokens to tokenizer
     tokenizer.add_tokens(new_toks)
 
-    #update model's embedding matrix for new tokens as average of pair
-    #if you know of a better way to do this; feel free to modify
-    #could also initialize model to full target embedding size and fill in new tokens rather than resizing each time.
+    # update model's embedding matrix for new tokens as average of pair
+    # if you know of a better way to do this; feel free to modify
+    # could also initialize model to full target embedding size and fill in
+    # new tokens rather than resizing each time.
     model.resize_token_embeddings(len(tokenizer))
     model_embs = model.get_input_embeddings()
     new_embs = model_embs.weight[top_alphas].mean(axis=1)
-    model_embs.weight[len(tokenizer) - len(new_toks):] = new_embs
+    model_embs.weight[len(tokenizer) - len(new_toks) :] = new_embs
     model.set_input_embeddings(model_embs)
     model.tie_weights()
-    print('Newly added tokens', new_toks)
+    print("Newly added tokens", new_toks)
     return tokenizer, model, alpha_toks
 
+
 def construct_dataset(
-    seed: int, block_size: int, large_track: bool, subsample: int | None
+    seed: int,
+    block_size: int,
+    large_track: bool,
+    subsample: int | None,
+    stack: bool,
+    tokenizer: PreTrainedTokenizerFast | None,
 ):
     """Construct BabyLM dataset and initial tokenizer."""
     # Check if PROJECT_ROOT / data has more than a single .gitkeep file in it
     if not len(list(PROJECT_ROOT.glob("data/*"))) > 1:
         download_data()
 
-    data = load_data(large_track=large_track, subsample=subsample)
+    data = load_data(large_track=large_track, subsample=subsample, seed=seed)
     dataset = data["dataset"]
     all_chars = data["all_chars"]
 
-    tokenizer = get_initial_tokenizer(all_chars)
+    if tokenizer is None:
+        tokenizer = get_initial_tokenizer(all_chars)
+    else:
+        tokenizer.add_tokens(list(all_chars))
 
-    tokenize_map = partial(tokenize, tokenizer=tokenizer)
+    # print(tokenizer)
+
+    preprocess_fn = partial(
+        preprocess, tokenizer=tokenizer, trunc=not stack, max_len=block_size
+    )
     dataset = dataset.map(
-        tokenize_map,
+        preprocess_fn,
         batched=True,
         num_proc=os.cpu_count(),
         remove_columns=dataset["train"].column_names,
     )
 
-    # Shuffle before stacking
-    dataset["train"] = dataset["train"].shuffle(seed=seed)
-
-    stack_map = partial(stack_sequences, block_size=block_size)
-    dataset = dataset.map(
-        stack_map,
-        batched=True,
-        num_proc=os.cpu_count(),
-    )
+    if stack:
+        stack_fn = partial(stack_sequences, block_size=block_size)
+        dataset = dataset.map(
+            stack_fn,
+            batched=True,
+            num_proc=os.cpu_count(),
+        )
 
     return {
         "dataset": dataset,

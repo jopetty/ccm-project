@@ -3,13 +3,12 @@
 import json
 import logging
 import os
+import time
 from datetime import datetime
 from pathlib import Path
-from pprint import pformat
-from random import randint
+from random import randint, sample
 
 import fire
-import humanize
 import pyrootutils
 import torch
 import torch.nn.functional as F  # noqa: N812
@@ -17,13 +16,13 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from dotenv import load_dotenv
-from torch import optim
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 from transformers import (
     AutoModelForCausalLM,
     DataCollatorForLanguageModeling,
     GPT2Config,
+    Trainer,
+    TrainingArguments,
 )
 
 from data import construct_dataset, merge_new_tokens
@@ -64,12 +63,13 @@ def main(
     eval_every: int = 100,
     gradient_clip: float | None = 1.0,
     block_size: int = 512,
-    stack_sequences: bool = True,
     num_vocab_merges_per_step: int = 50,
-    update_vocab_every: int = 1,
+    update_vocab_every: int = 100,
+    update_vocab: bool = True,
     # Dataset Parameters
     large_track: bool = False,
     subsample: int | None = None,
+    stack_sequences: bool = True,
     # Miscellaneous
     output_dir: Path = PROJECT_ROOT / "outputs",
     seed: int = randint(0, 2**32 - 1),
@@ -79,7 +79,8 @@ def main(
     """Train models."""
     set_seed(seed)
 
-    accelerator = Accelerator(log_with="wandb") if logging else Accelerator()
+    # accelerator = Accelerator(log_with="wandb") if logging else Accelerator()
+    accelerator = Accelerator()
 
     # create project directory inside output_dir based on the timestamp
     # plus a two-character random string
@@ -93,7 +94,12 @@ def main(
         project_dir.mkdir()
 
     dataset_dict = construct_dataset(
-        large_track=large_track, seed=seed, subsample=subsample, block_size=block_size
+        large_track=large_track,
+        seed=seed,
+        subsample=subsample,
+        block_size=block_size,
+        stack=stack_sequences,
+        tokenizer=None,
     )
 
     dataset = dataset_dict["dataset"]
@@ -127,6 +133,8 @@ def main(
         "subsample": subsample,
         "stack_sequences": stack_sequences,
         "weight_decay": weight_decay,
+        "update_vocab_every": update_vocab_every,
+        "num_vocab_merges_per_step": num_vocab_merges_per_step,
     }
 
     accelerator.init_trackers(
@@ -134,8 +142,8 @@ def main(
         config=project_hps,
     )
 
-    log.info(f"Config: {pformat(project_hps)}")
-    log.info(f"Dataset: {dataset}")
+    print(f"Config: {project_hps}")
+    # log.info(f"Dataset: {dataset}")
 
     with open(project_dir / "project_hps.json", "w") as f:
         json.dump(project_hps, f)
@@ -158,113 +166,156 @@ def main(
         gpt_config,
     )
 
-    log.info(f"Model: {model}")
-    log.info(
-        f"Number of parameters: {humanize.intword(model.num_parameters)}"
-        f" ({model.num_parameters})"
-    )
     log.info(f"Accelerator state: {accelerator.state}")
 
-    device = accelerator.device
-
-    model = model.to(device)
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=lr,
-        betas=(beta1, beta2),
+    training_args = TrainingArguments(
+        output_dir=project_dir,
+        logging_strategy="epoch",
+        logging_first_step=True,
+        learning_rate=lr,
+        load_best_model_at_end=True,
         weight_decay=weight_decay,
+        push_to_hub=False,
+        max_grad_norm=gradient_clip,
+        per_device_train_batch_size=per_device_batch_size,
+        per_device_eval_batch_size=per_device_batch_size,
+        torch_compile=False,
+        num_train_epochs=1,
+        lr_scheduler_type="cosine",
+        save_total_limit=1,
+        save_safetensors=True,
+        save_strategy="no",
+        seed=seed,
+        report_to="none",
     )
 
-    data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
-    train_dataloader = DataLoader(
-        dataset["train"],
-        shuffle=False,
-        batch_size=per_device_batch_size,
-        collate_fn=data_collator,
+    total_merge_probs = torch.zeros((len(tokenizer), len(tokenizer)))
+    total_merge_counts = torch.zeros((len(tokenizer), len(tokenizer)))
+    alpha_toks = set(
+        [idx for tok, idx in tokenizer.get_added_vocab().items() if tok.isalpha()]
     )
-    eval_dataloader = DataLoader(
-        dataset["validation"],
-        shuffle=False,
-        batch_size=per_device_batch_size,
-        collate_fn=data_collator,
-    )
-
-    model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
-        model, optimizer, train_dataloader, eval_dataloader
-    )
-
-    total_merge_probs = torch.zeros((len(tokenizer), len(tokenizer)), device=model.device)
-    total_merge_counts = torch.zeros((len(tokenizer), len(tokenizer)), dtype=int, device=model.device)
-    alpha_toks = set([idx for tok, idx in tokenizer.get_added_vocab().items() if tok.isalpha()])
     prev_merged = set()
-    global_step = 0
-    for _ in (n_bar := tqdm(range(num_epochs), desc="Epochs", position=0, leave=False)):
-        model.train()
-        for batch in tqdm(train_dataloader, desc="Train", position=1, leave=False):
-            global_step += 1
-            optimizer.zero_grad()
 
-            output = model(**batch)
+    data_seeds = sample(range(1, 100), num_epochs)
 
-            target = batch["labels"].flatten()
-            logits = output.logits.flatten(end_dim=-2)
-            loss = F.cross_entropy(logits, target, reduction='none')
-            accelerator.backward(loss.mean())
+    for e in range(num_epochs):
+        print("#####################################")
+        print(f"Epoch: {e}")
+        print(f"{len(tokenizer)} tokens in tokenizer")
+        print("#####################################")
 
-            if gradient_clip is not None:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), gradient_clip, norm_type=2.0
+        data_collator = DataCollatorForLanguageModeling(
+            tokenizer,
+            mlm=False,
+        )
+
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=dataset["train"],
+            eval_dataset=dataset["validation"],
+            data_collator=data_collator,
+        )
+        trainer.train()
+
+        device = trainer.model.device
+
+        total_merge_probs = total_merge_probs.to(device)
+        total_merge_counts = total_merge_counts.to(device)
+
+        vocab_dataloader = DataLoader(
+            dataset["train"],
+            shuffle=False,
+            batch_size=per_device_batch_size,
+            collate_fn=data_collator,
+        )
+        vocab_dataloader = accelerator.prepare(vocab_dataloader)
+
+        model.eval()
+        with torch.no_grad():
+            start = time.time()
+            for idx, v_batch in enumerate(vocab_dataloader):
+                output = model(**v_batch)
+                target = v_batch["labels"]
+                logits = output.logits
+
+                if idx == 0:
+                    first_target = target[0]
+                    first_target[first_target == -100] = tokenizer.eos_token_id
+                    first_logits = logits[0].argmax(dim=-1)
+                    print("Vocab batch:")
+                    print(f"Target: {tokenizer.decode(
+                        first_target, skip_special_tokens=not stack_sequences)}")
+                    print(f"Prediction: {tokenizer.decode(
+                        first_logits, skip_special_tokens=not stack_sequences)}")
+
+                if update_vocab:
+                    target = target.flatten()
+                    logits = logits.flatten(end_dim=-2)
+                    loss = F.cross_entropy(logits, target, reduction="none")
+
+                    # update bigram prob and count tracker
+                    # (had to do this iteratively bc memory overhead was too large if
+                    # tensorized; hope its not too slow)
+                    target_toks, probs = target[target >= 0], (-loss[target >= 0]).exp()
+
+                    for w_i in range(1, target_toks.shape[0]):
+                        total_merge_probs[target_toks[w_i - 1], target_toks[w_i]] += (
+                            probs[w_i]
+                        )
+                        total_merge_counts[target_toks[w_i - 1], target_toks[w_i]] += 1
+
+            end = time.time()
+            print(f"Time to evaluate: {end - start}")
+
+            if update_vocab:
+                start = time.time()
+                tokenizer, model, alpha_toks = merge_new_tokens(
+                    total_merge_probs,
+                    total_merge_counts,
+                    num_vocab_merges_per_step,
+                    tokenizer,
+                    model,
+                    alpha_toks,
+                    prev_merged,
+                )
+                end = time.time()
+                print(f"Time to merge tokens: {end - start}")
+                dataset_dict = construct_dataset(
+                    large_track=large_track,
+                    seed=data_seeds[e],
+                    subsample=subsample,
+                    block_size=block_size,
+                    tokenizer=tokenizer,
+                    stack=stack_sequences,
+                )
+                dataset = dataset_dict["dataset"]
+
+                # Pad total_merge_probs, total_merge_counts to match new tokenizer size
+                new_len = len(tokenizer)
+                old_len = total_merge_probs.shape[0]
+
+                total_merge_probs = F.pad(
+                    total_merge_probs, (0, new_len - old_len, 0, new_len - old_len)
+                )
+                total_merge_counts = F.pad(
+                    total_merge_counts, (0, new_len - old_len, 0, new_len - old_len)
                 )
 
-            optimizer.step()
+                # prompt = "Hello, "
+                # p_input = tokenizer(prompt, return_tensors="pt")
+                # p_input = {k: v[:-1].to(device) for k, v in p_input.items()}
+                # p_output = model.generate(
+                #     **p_input,
+                #     do_sample=True,
+                #     num_beams=1,
+                #     max_new_tokens=100,
+                #     num_return_sequences=1,
+                # )
+                # print(tokenizer.decode(p_output[0], skip_special_tokens=False))
 
-            n_bar.set_postfix({"loss": f"{loss.mean():.5f}"})
-            accelerator.log(
-                {
-                    "train/custom_loss": loss.mean(),
-                    "train/hf_loss": output.loss,
-                },
-                step=global_step,
-            )
+                tokenizer.save_pretrained(project_dir, filename_prefix=f"{e}")
 
-            #update bigram prob and count tracker (had to do this iteratively bc memory overhead was too large if tensorized; hope its not too slow)
-            target_toks, probs = target[target >= 0], (-loss[target >= 0]).exp()
-            for w_i in range(1, target_toks.shape[0]):
-                total_merge_probs[target_toks[w_i-1], target_toks[w_i]] += probs[w_i]
-                total_merge_counts[target_toks[w_i-1], target_toks[w_i]] += 1
-            
-            if global_step % eval_every == 0:
-                model.eval()
-                with torch.no_grad():
-                    val_losses = []
-                    for batch in tqdm(
-                        eval_dataloader, desc="Eval", position=1, leave=False
-                    ):
-                        output = model(**batch)
-                        target = batch["labels"].flatten()
-                        logits = output.logits.flatten(end_dim=-2)
-                        loss = F.cross_entropy(logits, target)
-                        val_losses.append((loss, output.loss))
-
-                    eval_samples = len(val_losses)
-                    custom_val_loss = sum([x[0] for x in val_losses]) / eval_samples
-                    hf_val_loss = sum([x[1] for x in val_losses]) / eval_samples
-                    accelerator.log(
-                        {
-                            "eval/custom_loss": custom_val_loss,
-                            "eval/hf_loss": hf_val_loss,
-                        },
-                        step=global_step,
-                    )
-                model.train()
-
-                        #this can be placed at any point in the loop, maybe like a few times each epoch?
-            if global_step % update_vocab_every == 0:
-                with torch.no_grad():
-                    merge_new_tokens(total_merge_probs, total_merge_counts, num_vocab_merges_per_step, tokenizer, model, alpha_toks, prev_merged)
-            #todo: need to re-tokenize inputs after vocab update
-
-    accelerator.end_training()
     model.save_pretrained(project_dir)
 
 
