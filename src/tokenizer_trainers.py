@@ -12,9 +12,10 @@ from itertools import pairwise
 from math import exp
 import pyrootutils
 from tokenizers import Tokenizer
-from tokenizers.decoders import BPEDecoder
+from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 from tokenizers.models import BPE
-from tokenizers.pre_tokenizers import ByteLevel
+from tokenizers.normalizers import Sequence, NFD, Lowercase, Replace, StripAccents
+from tokenizers.pre_tokenizers import ByteLevel, Digits, Sequence as PTSequence
 from tokenizers.processors import TemplateProcessing
 from tokenizers.trainers import BpeTrainer
 from transformers import PreTrainedTokenizerFast
@@ -52,7 +53,7 @@ class TokenizerTrainer(ABC):
     
 
 class BPETokenizerTrainer(TokenizerTrainer):
-    def __init__(self, vocab_size: int, min_frequency: int) -> None:
+    def __init__(self, vocab_size: int, min_frequency: int, split_on_space: bool) -> None:
         super().__init__()
         self._tokenizer_base = Tokenizer(BPE())
         self._tokenizer_base.add_special_tokens(SpecialTokens.values())
@@ -60,8 +61,13 @@ class BPETokenizerTrainer(TokenizerTrainer):
         self.min_frequency = min_frequency
         # use_regex=True uses the GPT2 regexp for spliting on whitespace
         # TODO: maybe change this?
-        self._tokenizer_base.pre_tokenizer = ByteLevel(add_prefix_space=True, use_regex=True) 
-        self._tokenizer_base.decoder = BPEDecoder(suffix="Ġ")
+        if split_on_space:
+            self._tokenizer_base.normalizer = Sequence([NFD(), StripAccents(), Lowercase()])
+        else:
+            self._tokenizer_base.normalizer = Sequence([NFD(), StripAccents(), Lowercase(), Replace(" ", "")])
+        self._tokenizer_base.pre_tokenizer = PTSequence([Digits(individual_digits=False),
+                                                        ByteLevel(add_prefix_space=split_on_space, use_regex=split_on_space)])
+        self._tokenizer_base.decoder = ByteLevelDecoder()
         self._tokenizer_base.post_processor = TemplateProcessing(
             single=f"{SpecialTokens.BOS} $A {SpecialTokens.EOS}",
             special_tokens=[
@@ -89,7 +95,7 @@ def get_desired_vocab_size(step: int, initial_alphabet: list[str]):
     """Gets the desired vocab size at this step.
     Minimally, the vocab size should be the same size as initial_alphabet."""
     # TODO: Make this more sensible
-    return int(exp(step) + len(initial_alphabet))
+    return int(exp(step+1) + len(initial_alphabet))
 
 
 def main(
@@ -97,6 +103,7 @@ def main(
         tokenizer_type: str = "BPE",
         incremental: bool | None = False,
         retrain: bool = True,
+        split_on_space: bool = True, # whether to split on space + punctuation, or not
         output_dir: Path = PROJECT_ROOT / "outputs",
         vocab_size: int = 30000,
         min_frequency: int | None = 15,
@@ -123,10 +130,11 @@ def main(
     tokenizer_hps = {
         "tokenizer_type": tokenizer_type,
         "retrain": retrain,
+        "split_on_space": split_on_space,
         "incremental": incremental,
         "vocab_size": vocab_size,
         "min_frequency": min_frequency,
-        "bpe_batches": bpe_batches,
+        "bpe_batches": bpe_batches if incremental else 1,
         "large_track": large_track,
         "subsample": subsample,
     }
@@ -144,20 +152,18 @@ def main(
         end_points = range(0, len(dataset), step_size)
         if retrain:
             steps = [(0, step) for step in end_points]
-            steps.append((0, len(dataset)))
+            steps[-1] = ((0, len(dataset)))
         else:
             steps = list(pairwise(end_points))
-            steps.append((end_points[-1], len(dataset)))
+            steps[-1] = (end_points[-2], len(dataset)) 
         desired_vocab_sizes = [get_desired_vocab_size(i, initial_alphabet) for i in range(len(steps))]
     else: # not incremental; just do one step
         steps = [(0,len(dataset))]
         desired_vocab_sizes = [vocab_size,]
 
-    for ((s, e), v) in zip(steps, desired_vocab_sizes):
-        print(f"Start: {s}, End: {e}, Vocab Size: {v}")
-
     for i, ((s, e), desired_vocab_size) in enumerate(zip(steps, desired_vocab_sizes)):
-        trainer = BPETokenizerTrainer(vocab_size=desired_vocab_size, min_frequency=min_frequency)
+        print(f"Start: {s}, End: {e}, Vocab Size: {desired_vocab_size}")
+        trainer = BPETokenizerTrainer(vocab_size=desired_vocab_size, min_frequency=min_frequency, split_on_space=split_on_space)
 
         trainer.train(dataset=dataset["text"][s:e], initial_alphabet=previous_alphabet)
         trainer.tokenizer_base().save(str(project_dir/ f"tokenizer_{i}.json"))
