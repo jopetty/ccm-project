@@ -5,9 +5,9 @@ import zipfile
 from enum import StrEnum
 from functools import partial
 from multiprocessing import Pool
-import requests
 
 import pyrootutils
+import requests
 import torch
 from datasets import Dataset, DatasetDict, load_dataset
 from osfclient import cli
@@ -101,34 +101,36 @@ def stack_sequences(examples: DatasetDict, block_size: int):
 
 def load_references():
     """Download and format reference data."""
-    reference_files = {"wordlist.txt": "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt",
-                       "sigmorphon_train.tsv": "https://raw.githubusercontent.com/sigmorphon/2022SegmentationST/main/data/eng.word.train.tsv",
-                       "sigmorphon_dev.tsv": "https://raw.githubusercontent.com/sigmorphon/2022SegmentationST/main/data/eng.word.dev.tsv",
-                       "aoa_ws_fit.csv": "https://gist.githubusercontent.com/craaaa/1c254cdc29bbe3f9ab25d66afc3ecfa3/raw/079968f76b94a1d38da066306c5b8688d2927018/gistfile1.txt",
-                       }
+    reference_files = {
+        "wordlist.txt": "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt",
+        "sigmorphon_train.tsv": "https://raw.githubusercontent.com/sigmorphon/2022SegmentationST/main/data/eng.word.train.tsv",
+        "sigmorphon_dev.tsv": "https://raw.githubusercontent.com/sigmorphon/2022SegmentationST/main/data/eng.word.dev.tsv",
+        "aoa_ws_fit.csv": "https://gist.githubusercontent.com/craaaa/1c254cdc29bbe3f9ab25d66afc3ecfa3/raw/079968f76b94a1d38da066306c5b8688d2927018/gistfile1.txt",
+    }
     os.makedirs(PROJECT_ROOT / "data/references", exist_ok=True)
 
     for fname, url in reference_files.items():
         print(f"Getting {fname}")
         get_response = requests.get(url)
         if get_response.ok:
-            with open(PROJECT_ROOT / "data/references" / fname, 'w') as f:
+            with open(PROJECT_ROOT / "data/references" / fname, "w") as f:
                 f.write(get_response.text)
         else:
             print(f"Could not obtain {fname} from {url}")
 
     morphemes = set()
-    files = [PROJECT_ROOT / "data/references" / "sigmorphon_train.tsv",
-            PROJECT_ROOT / "data/references" / "sigmorphon_dev.tsv"
-            ]
+    files = [
+        PROJECT_ROOT / "data/references" / "sigmorphon_train.tsv",
+        PROJECT_ROOT / "data/references" / "sigmorphon_dev.tsv",
+    ]
     for fname in files:
-        with open(fname, 'r') as f:
+        with open(fname, "r") as f:
             for line in f:
                 word, morphs, _ = line.split("\t")
-                m = morphs.strip().replace("@@","").split(" ")
+                m = morphs.strip().replace("@@", "").split(" ")
                 morphemes.update(m)
 
-    with open(PROJECT_ROOT / "data/references" / "sigmorphon_morphemes.txt", 'w') as f:
+    with open(PROJECT_ROOT / "data/references" / "sigmorphon_morphemes.txt", "w") as f:
         for line in morphemes:
             f.write(line + "\n")
 
@@ -178,6 +180,9 @@ def load_data(large_track: bool, subsample: int | None, seed: int) -> dict:
         }
 
     dataset = load_dataset("text", data_files=data_files)
+
+    print(dataset)
+    raise SystemExit
 
     if subsample is not None:
         dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample))

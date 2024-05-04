@@ -302,18 +302,6 @@ def main(
                     total_merge_counts, (0, new_len - old_len, 0, new_len - old_len)
                 )
 
-                # prompt = "Hello, "
-                # p_input = tokenizer(prompt, return_tensors="pt")
-                # p_input = {k: v[:-1].to(device) for k, v in p_input.items()}
-                # p_output = model.generate(
-                #     **p_input,
-                #     do_sample=True,
-                #     num_beams=1,
-                #     max_new_tokens=100,
-                #     num_return_sequences=1,
-                # )
-                # print(tokenizer.decode(p_output[0], skip_special_tokens=False))
-
                 tokenizer.save_pretrained(project_dir, filename_prefix=f"{e}")
 
     model.save_pretrained(project_dir)
