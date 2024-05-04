@@ -55,7 +55,7 @@ def main(
     # Training Parameters
     num_epochs: int = 1,
     per_device_batch_size: int = 16,
-    lr: float = 1e-4,
+    lr: float = 5e-5,
     beta1: float = 0.9,
     beta2: float = 0.999,
     compile: bool = False,
@@ -178,11 +178,12 @@ def main(
         per_device_eval_batch_size=per_device_batch_size,
         torch_compile=False,
         num_train_epochs=1,
-        lr_scheduler_type="cosine",
+        lr_scheduler_type="constant",
         save_total_limit=1,
         save_safetensors=True,
         save_strategy="no",
         seed=seed,
+        report_to="none",
     )
 
     total_merge_probs = torch.zeros((len(tokenizer), len(tokenizer)))
@@ -196,11 +197,19 @@ def main(
 
     for e in range(num_epochs):
         print(f"Epoch: {e}")
+
+        data_collator = DataCollatorForLanguageModeling(
+            tokenizer,
+            mlm=False,
+            pad_to_multiple_of=block_size,
+        )
+
         trainer = Trainer(
             model=model,
             args=training_args,
             train_dataset=dataset["train"],
             eval_dataset=dataset["validation"],
+            data_collator=data_collator,
         )
         trainer.train()
 
@@ -209,7 +218,6 @@ def main(
         total_merge_probs = total_merge_probs.to(device)
         total_merge_counts = total_merge_probs.to(device)
 
-        data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
         eval_dataloader = DataLoader(
             dataset["validation"],
             shuffle=False,
@@ -232,9 +240,9 @@ def main(
                     first_logits = logits[0].argmax(dim=-1)
                     print("Eval batch:")
                     print(f"Target: {tokenizer.decode(
-                        first_target, skip_special_tokens=True)}")
+                        first_target, skip_special_tokens=False)}")
                     print(f"Prediction: {tokenizer.decode(
-                        first_logits, skip_special_tokens=True)}")
+                        first_logits, skip_special_tokens=False)}")
 
                 target = target.flatten()
                 logits = logits.flatten(end_dim=-2)
@@ -286,17 +294,17 @@ def main(
                 total_merge_counts, (0, new_len - old_len, 0, new_len - old_len)
             )
 
-            prompt = "Hello, "
-            p_input = tokenizer(prompt, return_tensors="pt")
-            p_input = {k: v.to(device) for k, v in p_input.items()}
-            p_output = model.generate(
-                **p_input,
-                do_sample=True,
-                num_beams=1,
-                max_new_tokens=100,
-                num_return_sequences=1,
-            )
-            print(tokenizer.decode(p_output[0], skip_special_tokens=False))
+            # prompt = "Hello, "
+            # p_input = tokenizer(prompt, return_tensors="pt")
+            # p_input = {k: v[:-1].to(device) for k, v in p_input.items()}
+            # p_output = model.generate(
+            #     **p_input,
+            #     do_sample=True,
+            #     num_beams=1,
+            #     max_new_tokens=100,
+            #     num_return_sequences=1,
+            # )
+            # print(tokenizer.decode(p_output[0], skip_special_tokens=False))
 
             tokenizer.save_pretrained(project_dir, filename_prefix=f"{e}")
 

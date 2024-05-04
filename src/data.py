@@ -67,35 +67,26 @@ class OSFArgs:
         self.update = True
 
 
-def tokenize(
-    examples: DatasetDict, tokenizer: PreTrainedTokenizerFast, max_length: int
+def preprocess(
+    examples: DatasetDict, tokenizer: PreTrainedTokenizerFast
 ) -> DatasetDict:
     """Tokenize dataset."""
     return tokenizer(
         examples["text"],
-        padding="max_length",
-        max_length=max_length,
-        truncation=True,
-        return_tensors="pt",
+        # padding=True,
+        # truncation=True,
+        # max_length=512,
     )
 
 
-def stack_sequences(examples: DatasetDict, block_size: int | None = None):
+def stack_sequences(examples: DatasetDict, block_size: int):
     """Sequence stacking."""
-    if block_size is None:
-        examples["labels"] = examples["input_ids"].copy()
-        return examples
-
     concatenated_examples = {k: sum(examples[k], []) for k in examples.keys()}
     total_length = len(concatenated_examples[list(examples.keys())[0]])
-    if total_length >= block_size:
-        total_length = (total_length // block_size) * block_size
     result = {
         k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
         for k, t in concatenated_examples.items()
     }
-    result["labels"] = result["input_ids"].copy()
-
     return result
 
 
@@ -279,19 +270,17 @@ def construct_dataset(
     else:
         tokenizer.add_tokens(list(all_chars))
 
-    tokenize_map = partial(tokenize, tokenizer=tokenizer, max_length=block_size)
+    preprocess_fn = partial(preprocess, tokenizer=tokenizer)
     dataset = dataset.map(
-        tokenize_map,
+        preprocess_fn,
+        batched=True,
         num_proc=os.cpu_count(),
         remove_columns=dataset["train"].column_names,
     )
 
-    # # Shuffle before stacking
-    # dataset["train"] = dataset["train"].shuffle(seed=seed)
-
-    stack_map = partial(stack_sequences, block_size=block_size)
+    stack_fn = partial(stack_sequences, block_size=block_size)
     dataset = dataset.map(
-        stack_map,
+        stack_fn,
         batched=True,
         num_proc=os.cpu_count(),
     )
