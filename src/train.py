@@ -55,7 +55,7 @@ def main(
     # Training Parameters
     num_epochs: int = 1,
     per_device_batch_size: int = 16,
-    lr: float = 5e-5,
+    lr: float = 1e-4,
     beta1: float = 0.9,
     beta2: float = 0.999,
     compile: bool = False,
@@ -65,6 +65,7 @@ def main(
     block_size: int = 512,
     num_vocab_merges_per_step: int = 50,
     update_vocab_every: int = 100,
+    update_vocab: bool = True,
     # Dataset Parameters
     large_track: bool = False,
     subsample: int | None = None,
@@ -163,7 +164,6 @@ def main(
     )
 
     log.info(f"Accelerator state: {accelerator.state}")
-    # device = accelerator.device
 
     training_args = TrainingArguments(
         output_dir=project_dir,
@@ -178,7 +178,7 @@ def main(
         per_device_eval_batch_size=per_device_batch_size,
         torch_compile=False,
         num_train_epochs=1,
-        lr_scheduler_type="constant",
+        lr_scheduler_type="cosine",
         save_total_limit=1,
         save_safetensors=True,
         save_strategy="no",
@@ -216,7 +216,7 @@ def main(
         device = trainer.model.device
 
         total_merge_probs = total_merge_probs.to(device)
-        total_merge_counts = total_merge_probs.to(device)
+        total_merge_counts = total_merge_counts.to(device)
 
         eval_dataloader = DataLoader(
             dataset["validation"],
@@ -244,69 +244,71 @@ def main(
                     print(f"Prediction: {tokenizer.decode(
                         first_logits, skip_special_tokens=False)}")
 
-                target = target.flatten()
-                logits = logits.flatten(end_dim=-2)
-                loss = F.cross_entropy(logits, target, reduction="none")
+                if update_vocab:
+                    target = target.flatten()
+                    logits = logits.flatten(end_dim=-2)
+                    loss = F.cross_entropy(logits, target, reduction="none")
 
-                # update bigram prob and count tracker
-                # (had to do this iteratively bc memory overhead was too large if
-                # tensorized; hope its not too slow)
-                target_toks, probs = target[target >= 0], (-loss[target >= 0]).exp()
+                    # update bigram prob and count tracker
+                    # (had to do this iteratively bc memory overhead was too large if
+                    # tensorized; hope its not too slow)
+                    target_toks, probs = target[target >= 0], (-loss[target >= 0]).exp()
 
-                for w_i in range(1, target_toks.shape[0]):
-                    total_merge_probs[target_toks[w_i - 1], target_toks[w_i]] += probs[
-                        w_i
-                    ]
-                    total_merge_counts[target_toks[w_i - 1], target_toks[w_i]] += 1
+                    for w_i in range(1, target_toks.shape[0]):
+                        total_merge_probs[target_toks[w_i - 1], target_toks[w_i]] += (
+                            probs[w_i]
+                        )
+                        total_merge_counts[target_toks[w_i - 1], target_toks[w_i]] += 1
 
             end = time.time()
             print(f"Time to evaluate: {end - start}")
 
-            start = time.time()
-            tokenizer, model, alpha_toks = merge_new_tokens(
-                total_merge_probs,
-                total_merge_counts,
-                num_vocab_merges_per_step,
-                tokenizer,
-                model,
-                alpha_toks,
-                prev_merged,
-            )
-            end = time.time()
-            print(f"Time to merge tokens: {end - start}")
-            dataset_dict = construct_dataset(
-                large_track=large_track,
-                seed=data_seeds[e],
-                subsample=subsample,
-                block_size=block_size,
-                tokenizer=tokenizer,
-            )
-            dataset = dataset_dict["dataset"]
+            if update_vocab:
+                start = time.time()
+                tokenizer, model, alpha_toks = merge_new_tokens(
+                    total_merge_probs,
+                    total_merge_counts,
+                    num_vocab_merges_per_step,
+                    tokenizer,
+                    model,
+                    alpha_toks,
+                    prev_merged,
+                )
+                end = time.time()
+                print(f"Time to merge tokens: {end - start}")
+                dataset_dict = construct_dataset(
+                    large_track=large_track,
+                    seed=data_seeds[e],
+                    subsample=subsample,
+                    block_size=block_size,
+                    tokenizer=tokenizer,
+                )
+                dataset = dataset_dict["dataset"]
 
-            # Pad total_merge_probs, total_merge_counts to match new tokenizer size
-            new_len = len(tokenizer)
-            old_len = total_merge_probs.shape[0]
+                # Pad total_merge_probs, total_merge_counts to match new tokenizer size
+                new_len = len(tokenizer)
+                old_len = total_merge_probs.shape[0]
 
-            total_merge_probs = F.pad(
-                total_merge_probs, (0, new_len - old_len, 0, new_len - old_len)
-            )
-            total_merge_counts = F.pad(
-                total_merge_counts, (0, new_len - old_len, 0, new_len - old_len)
-            )
+                total_merge_probs = F.pad(
+                    total_merge_probs, (0, new_len - old_len, 0, new_len - old_len)
+                )
+                total_merge_counts = F.pad(
+                    total_merge_counts, (0, new_len - old_len, 0, new_len - old_len)
+                )
 
-            # prompt = "Hello, "
-            # p_input = tokenizer(prompt, return_tensors="pt")
-            # p_input = {k: v[:-1].to(device) for k, v in p_input.items()}
-            # p_output = model.generate(
-            #     **p_input,
-            #     do_sample=True,
-            #     num_beams=1,
-            #     max_new_tokens=100,
-            #     num_return_sequences=1,
-            # )
-            # print(tokenizer.decode(p_output[0], skip_special_tokens=False))
+                # prompt = "Hello, "
+                # p_input = tokenizer(prompt, return_tensors="pt")
+                # p_input = {k: v[:-1].to(device) for k, v in p_input.items()}
+                # p_output = model.generate(
+                #     **p_input,
+                #     do_sample=True,
+                #     num_beams=1,
+                #     max_new_tokens=100,
+                #     num_return_sequences=1,
+                # )
+                # print(tokenizer.decode(p_output[0], skip_special_tokens=False))
 
-            tokenizer.save_pretrained(project_dir, filename_prefix=f"{e}")
+                tokenizer.save_pretrained(project_dir, filename_prefix=f"{e}")
 
     model.save_pretrained(project_dir)
 

@@ -71,8 +71,10 @@ def preprocess(
     examples: DatasetDict, tokenizer: PreTrainedTokenizerFast
 ) -> DatasetDict:
     """Tokenize dataset."""
+    # print([x.lower() for x in examples["text"]])
+    # raise SystemExit
     return tokenizer(
-        examples["text"],
+        [x.lower() for x in examples["text"]]
         # padding=True,
         # truncation=True,
         # max_length=512,
@@ -159,7 +161,7 @@ def load_data(large_track: bool, subsample: int | None, seed: int) -> dict:
 
 def get_initial_tokenizer(unique_tokens: set[str]):
     """Get char-level tokenizer."""
-    tokenizer_base = Tokenizer(WordLevel())
+    tokenizer_base = Tokenizer(WordLevel(unk_token=SpecialTokens.UNK))
     # tokenizer_base.normalizer = normalizers.Sequence([
     #     NFD(),
     #     StripAccents(),
