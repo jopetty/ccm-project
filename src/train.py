@@ -70,6 +70,8 @@ def main(
     large_track: bool = False,
     subsample: int | None = None,
     stack_sequences: bool = True,
+    lower: bool = True,
+    spacing: bool = False,
     # Miscellaneous
     output_dir: Path = PROJECT_ROOT / "outputs",
     seed: int = randint(0, 2**32 - 1),
@@ -100,6 +102,8 @@ def main(
         block_size=block_size,
         stack=stack_sequences,
         tokenizer=None,
+        lower=lower,
+        spacing=spacing
     )
 
     dataset = dataset_dict["dataset"]
@@ -294,6 +298,8 @@ def main(
                     block_size=block_size,
                     tokenizer=tokenizer,
                     stack=stack_sequences,
+                    lower=lower,
+                    spacing=spacing
                 )
                 dataset = dataset_dict["dataset"]
 

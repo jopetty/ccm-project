@@ -6,6 +6,7 @@ from enum import StrEnum
 from functools import partial
 from multiprocessing import Pool
 import requests
+import re
 
 import pyrootutils
 import torch
@@ -74,17 +75,27 @@ def preprocess(
     tokenizer: PreTrainedTokenizerFast,
     trunc: bool = True,
     max_len: int = 512,
+    lower: bool = True,
+    spacing: bool = True
 ) -> DatasetDict:
     """Tokenize dataset."""
+    if(spacing and lower):
+        toks = [unidecode(x).lower() for x in examples["text"]]
+    elif(spacing):
+        toks = [unidecode(x) for x in examples["text"]]
+    elif(lower):
+        toks = [re.sub(r"\s+", "", unidecode(x).lower()) for x in examples["text"]]
+    else:
+        toks = [re.sub(r"\s+", "", unidecode(x)) for x in examples["text"]]
     if trunc:
         return tokenizer(
-            [unidecode(x).lower() for x in examples["text"]],
+            toks,
             truncation=trunc,
             max_length=512,
         )
     else:
         return tokenizer(
-            [unidecode(x).lower() for x in examples["text"]],
+            toks,
         )
 
 
@@ -261,7 +272,7 @@ def merge_new_tokens(
     # unigram probability of a token
     bigram_probs = total_merge_probs / total_merge_counts
     unigram_probs = total_merge_probs.sum(axis=0) / total_merge_counts.sum(axis=0)
-    merge_scores = bigram_probs / unigram_probs  # P(wi|wi-1)/ P(wi)
+    merge_scores = (bigram_probs / unigram_probs) * total_merge_counts  # P(wi|wi-1)/ P(wi)
     merge_scores = torch.nan_to_num(merge_scores)
     merge_scores *= prev_merged
     # get top num_to_merge valid token pairs
@@ -301,6 +312,8 @@ def construct_dataset(
     subsample: int | None,
     stack: bool,
     tokenizer: PreTrainedTokenizerFast | None,
+    lower: bool,
+    spacing: bool
 ):
     """Construct BabyLM dataset and initial tokenizer."""
     # Check if PROJECT_ROOT / data has more than a single .gitkeep file in it
@@ -319,7 +332,7 @@ def construct_dataset(
     # print(tokenizer)
 
     preprocess_fn = partial(
-        preprocess, tokenizer=tokenizer, trunc=not stack, max_len=block_size
+        preprocess, tokenizer=tokenizer, trunc=not stack, max_len=block_size, lower=lower, spacing=spacing
     )
     dataset = dataset.map(
         preprocess_fn,
