@@ -111,11 +111,22 @@ class BPETokenizerTrainer(TokenizerTrainer):
         self._tokenizer_base.train_from_iterator(dataset, trainer, length=len(dataset))
 
 
-def get_desired_vocab_size(step: int, initial_alphabet: list[str], max_vocab_size: int):
+def get_desired_vocab_size(
+    step: int,
+    initial_alphabet: list[str],
+    max_vocab_size: int,
+    num_vocab_merges_per_step: int | None,
+) -> int:
     """Gets the desired vocab size at this step.
     Minimally, the vocab size should be the same size as initial_alphabet.
     """
     # TODO: Make this more sensible
+
+    # if we are growing the vocabulary linearly
+    if num_vocab_merges_per_step is not None:
+        return len(initial_alphabet) + step * num_vocab_merges_per_step
+
+    # if we are growing the vocab exponentially
     return max(
         min(int(exp(step + 1) + len(initial_alphabet)), max_vocab_size),
         len(initial_alphabet),
@@ -131,6 +142,7 @@ def main(
     output_dir: Path = PROJECT_ROOT / "outputs" / "bpe-tokenizers",
     vocab_size: int = 30000,
     min_frequency: int | None = 15,
+    num_vocab_merges_per_step: int | None = 50,  # specify this to grow vocab linearly
     bpe_batches: int | None = 10,
     # Data Parameters
     large_track: bool = False,
@@ -172,6 +184,7 @@ def main(
         "incremental": incremental,
         "vocab_size": vocab_size,
         "min_frequency": min_frequency,
+        "num_vocab_merges_per_step": num_vocab_merges_per_step,
         "bpe_batches": bpe_batches if incremental else 1,
         "large_track": large_track,
         "subsample": subsample,
@@ -194,7 +207,9 @@ def main(
             steps = list(pairwise(end_points))
             steps[-1] = (end_points[-2], len(dataset))
         desired_vocab_sizes = [
-            get_desired_vocab_size(i, initial_alphabet, vocab_size)
+            get_desired_vocab_size(
+                i, initial_alphabet, vocab_size, num_vocab_merges_per_step
+            )
             for i in range(len(steps))
         ]
     else:  # not incremental; just do one step
@@ -204,7 +219,7 @@ def main(
         ]
 
     for i, ((s, e), desired_vocab_size) in enumerate(zip(steps, desired_vocab_sizes)):
-        print(f"Start: {s}, End: {e}, Vocab Size: {desired_vocab_size}")
+        print(f"Iteration: {i}, Start: {s}, End: {e}, Vocab Size: {desired_vocab_size}")
         trainer = BPETokenizerTrainer(
             vocab_size=desired_vocab_size,
             min_frequency=min_frequency,
