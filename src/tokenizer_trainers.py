@@ -152,7 +152,16 @@ def main(
     if subsample is not None:
         subsample *= bpe_batches
 
-    data = load_data(large_track=large_track, subsample=subsample, seed=seed)
+    # Not sure why this is necessary?
+    if incremental and not retrain:
+        bpe_batches += 1
+
+    data = load_data(
+        large_track=large_track,
+        subsample=subsample,
+        seed=seed,
+        remove_spaces=not split_on_space,
+    )
     dataset = data["dataset"]["train"]
     all_chars = data["all_chars"]
 

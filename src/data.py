@@ -42,7 +42,7 @@ class OSFArgs:
         self.update = True
 
 
-def normalize_string(s: str) -> str:
+def normalize_string(s: str, remove_spaces: bool) -> str:
     """Normalize a string."""
 
     def strip_accents(s: str) -> str:
@@ -56,7 +56,12 @@ def normalize_string(s: str) -> str:
     def collapse_spaces(s: str) -> str:
         return re.sub(r"\s+", " ", s)
 
+    def removing_spaces(s: str) -> str:
+        return re.sub(r"\s+", "", s)
+
     norm_maps = [strip_accents, lower, unidecode, collapse_spaces]
+    if remove_spaces:
+        norm_maps.append(removing_spaces)
 
     return reduce(lambda x, f: f(x), norm_maps, s)
 
@@ -66,17 +71,24 @@ def preprocess(
     tokenizer: PreTrainedTokenizerFast,
     trunc: bool = True,
     max_len: int = 512,
+    remove_spaces: bool = False,
 ) -> DatasetDict:
     """Tokenize dataset."""
     if trunc:
         return tokenizer(
-            [normalize_string(x) for x in examples["text"]],
+            [
+                normalize_string(x, remove_spaces=remove_spaces)
+                for x in examples["text"]
+            ],
             truncation=trunc,
             max_length=max_len,
         )
     else:
         return tokenizer(
-            [normalize_string(x) for x in examples["text"]],
+            [
+                normalize_string(x, remove_spaces=remove_spaces)
+                for x in examples["text"]
+            ],
         )
 
 
@@ -150,13 +162,15 @@ def download_data():
 def get_chars(example: Dataset) -> set:
     """Get all characters in dataset."""
     codepoints = set()
-    normalized_input = normalize_string(example["text"])
+    normalized_input = normalize_string(example["text"], remove_spaces=False)
     for char in normalized_input:
-        codepoints.add(normalize_string(char))
+        codepoints.add(normalize_string(char, remove_spaces=False))
     return codepoints
 
 
-def load_data(large_track: bool, subsample: int | None, seed: int) -> dict:
+def load_data(
+    large_track: bool, subsample: int | None, seed: int, remove_spaces: bool
+) -> dict:
     """Load BabyLM data into HF dataset object."""
     if large_track:
         data_files = {
@@ -187,6 +201,11 @@ def load_data(large_track: bool, subsample: int | None, seed: int) -> dict:
     test_chars = pool.map(get_chars, dataset["test"])
     all_chars = set.union(*train_chars, *val_chars, *test_chars)
 
+    if remove_spaces and " " in all_chars:
+        # Don't want to accidentally add-in spaces that will never be seen in
+        # the processed data.
+        all_chars.remove(" ")
+
     return {
         "dataset": dataset,
         "all_chars": all_chars,
@@ -207,30 +226,36 @@ def merge_new_tokens(
     # unigram probability of a token
     bigram_probs = total_merge_probs / total_merge_counts
     unigram_probs = total_merge_probs.sum(axis=0) / total_merge_counts.sum(axis=0)
-    merge_scores = bigram_probs / unigram_probs  # P(wi|wi-1)/ P(wi)
+    merge_scores = (
+        bigram_probs / unigram_probs
+    ) * total_merge_counts  # P(wi|wi-1)/ P(wi)
     merge_scores = torch.nan_to_num(merge_scores)
-
+    merge_scores *= prev_merged
     # get top num_to_merge valid token pairs
     merge_scores_ranked = merge_scores.flatten().argsort(descending=True)
-    merge_scores_ranked = (
-        merge_scores_ranked // merge_scores.shape[0],
-        merge_scores_ranked % merge_scores.shape[0],
-    )
-    top_alphas = [
-        (merge_scores_ranked[0][x].item(), merge_scores_ranked[1][x].item())
-        for x in range(len(merge_scores_ranked[0]))
-        if (merge_scores_ranked[0][x].item() in alpha_toks)
-        and (merge_scores_ranked[1][x].item() in alpha_toks)
-        and (
-            (merge_scores_ranked[0][x].item(), merge_scores_ranked[1][x].item())
-            not in prev_merged
+    merge_scores_ranked = torch.stack(
+        (
+            merge_scores_ranked // merge_scores.shape[0],
+            merge_scores_ranked % merge_scores.shape[0],
         )
-    ][:num_to_merge]
-    new_toks = [tokenizer.decode(x) + tokenizer.decode(y) for x, y in top_alphas]
+    )
+    top_alphas = merge_scores_ranked[:, :num_to_merge]
+    new_toks = [
+        tokenizer.decode(merge_scores_ranked[0, x])
+        + tokenizer.decode(merge_scores_ranked[1, x])
+        for x in range(top_alphas.shape[1])
+    ]
 
     # update counters
-    alpha_toks.update(range(len(tokenizer), len(tokenizer) + len(new_toks)))
-    prev_merged.update(top_alphas)
+    alpha_toks = torch.cat(
+        (
+            alpha_toks,
+            torch.arange(
+                len(tokenizer), len(tokenizer) + len(new_toks), device=model.device
+            ),
+        )
+    )
+    prev_merged[top_alphas] = False
 
     # add tokens to tokenizer
     tokenizer.add_tokens(new_toks)
@@ -241,12 +266,12 @@ def merge_new_tokens(
     # new tokens rather than resizing each time.
     model.resize_token_embeddings(len(tokenizer))
     model_embs = model.get_input_embeddings()
-    new_embs = model_embs.weight[top_alphas].mean(axis=1)
+    new_embs = model_embs.weight[top_alphas].mean(axis=0)
     model_embs.weight[len(tokenizer) - len(new_toks) :] = new_embs
     model.set_input_embeddings(model_embs)
     model.tie_weights()
     print("Newly added tokens", new_toks)
-    return tokenizer, model, alpha_toks
+    return tokenizer, model, alpha_toks, prev_merged
 
 
 def construct_dataset(
@@ -256,18 +281,28 @@ def construct_dataset(
     subsample: int | None,
     stack: bool,
     tokenizer: PreTrainedTokenizerFast | None,
+    remove_spaces: bool,
 ):
     """Construct BabyLM dataset and initial tokenizer."""
     # Check if PROJECT_ROOT / data has more than a single .gitkeep file in it
     if not len(list(PROJECT_ROOT.glob("data/*"))) > 1:
         download_data()
 
-    data = load_data(large_track=large_track, subsample=subsample, seed=seed)
+    data = load_data(
+        large_track=large_track,
+        subsample=subsample,
+        seed=seed,
+        remove_spaces=remove_spaces,
+    )
     dataset = data["dataset"]
     all_chars = data["all_chars"]
 
     if tokenizer is None:
-        tokenizer = CharacterTokenizer(all_chars, model_max_length=block_size)
+        tokenizer = CharacterTokenizer(
+            all_chars,
+            model_max_length=block_size,
+            split_on_whitespace=not remove_spaces,
+        )
     else:
         """
         If we already have a tokenzer, we want to construct an entirely new
@@ -286,21 +321,20 @@ def construct_dataset(
         normal_vocab = {
             k: v for k, v in current_vocab.items() if k not in current_specials
         }
-
-        # print(current_vocab)
-        # print(normal_vocab)
-
         new_chars = list(set(all_chars) - set(normal_vocab.keys()))
-
-        # print(new_chars)
         new_chars = [k for k in normal_vocab] + new_chars
-
-        # print(new_chars)
-        # raise SystemExit
-        tokenizer = CharacterTokenizer(new_chars, model_max_length=block_size)
+        tokenizer = CharacterTokenizer(
+            new_chars,
+            model_max_length=block_size,
+            split_on_whitespace=not remove_spaces,
+        )
 
     preprocess_fn = partial(
-        preprocess, tokenizer=tokenizer, trunc=not stack, max_len=block_size
+        preprocess,
+        tokenizer=tokenizer,
+        trunc=not stack,
+        max_len=block_size,
+        remove_spaces=remove_spaces,
     )
     dataset = dataset.map(
         preprocess_fn,
