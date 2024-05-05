@@ -1,51 +1,24 @@
 """Construct BabyLM Dataset and initial tokenizer."""
 
 import os
+import re
+import unicodedata
 import zipfile
-from enum import StrEnum
-from functools import partial
+from functools import partial, reduce
 from multiprocessing import Pool
-import requests
 
 import pyrootutils
+import requests
 import torch
+from character_tokenizer import CharacterTokenizer
 from datasets import Dataset, DatasetDict, load_dataset
 from osfclient import cli
-from tokenizers import Tokenizer
-from tokenizers.models import WordLevel
-from tokenizers.pre_tokenizers import WhitespaceSplit
-from tokenizers.processors import TemplateProcessing
 from transformers import PreTrainedTokenizerFast
 from unidecode import unidecode
 
 PROJECT_ROOT = path = pyrootutils.find_root(
     search_from=__file__, indicator=".project-root"
 )
-
-
-class SpecialTokens(StrEnum):
-    """Special tokens for tokenizer."""
-
-    BOS = "[BOS]"
-    UNK = "[UNK]"
-    EOS = "[EOS]"
-    SEP = "[SEP]"
-    CLS = "[CLS]"
-    PAD = "[PAD]"
-    MASK = "[MASK]"
-
-    @classmethod
-    def values(cls):
-        """Return a list of the string values of each special token."""
-        return list(map(lambda c: c.value, cls))
-
-    @property
-    def index(self):
-        """Return the index of the token in the vocabulary.
-
-        Used to get the index of the PAD token when directly modifying tensors.
-        """
-        return SpecialTokens.values().index(self.value)
 
 
 class OSFArgs:
@@ -69,6 +42,25 @@ class OSFArgs:
         self.update = True
 
 
+def normalize_string(s: str) -> str:
+    """Normalize a string."""
+
+    def strip_accents(s: str) -> str:
+        return "".join(
+            c for c in unicodedata.normalize("NFD", s) if not unicodedata.combining(c)
+        )
+
+    def lower(s: str) -> str:
+        return s.lower()
+
+    def collapse_spaces(s: str) -> str:
+        return re.sub(r"\s+", " ", s)
+
+    norm_maps = [strip_accents, lower, unidecode, collapse_spaces]
+
+    return reduce(lambda x, f: f(x), norm_maps, s)
+
+
 def preprocess(
     examples: DatasetDict,
     tokenizer: PreTrainedTokenizerFast,
@@ -78,13 +70,13 @@ def preprocess(
     """Tokenize dataset."""
     if trunc:
         return tokenizer(
-            [unidecode(x).lower() for x in examples["text"]],
+            [normalize_string(x) for x in examples["text"]],
             truncation=trunc,
-            max_length=512,
+            max_length=max_len,
         )
     else:
         return tokenizer(
-            [unidecode(x).lower() for x in examples["text"]],
+            [normalize_string(x) for x in examples["text"]],
         )
 
 
@@ -101,34 +93,36 @@ def stack_sequences(examples: DatasetDict, block_size: int):
 
 def load_references():
     """Download and format reference data."""
-    reference_files = {"wordlist.txt": "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt",
-                       "sigmorphon_train.tsv": "https://raw.githubusercontent.com/sigmorphon/2022SegmentationST/main/data/eng.word.train.tsv",
-                       "sigmorphon_dev.tsv": "https://raw.githubusercontent.com/sigmorphon/2022SegmentationST/main/data/eng.word.dev.tsv",
-                       "aoa_ws_fit.csv": "https://gist.githubusercontent.com/craaaa/1c254cdc29bbe3f9ab25d66afc3ecfa3/raw/079968f76b94a1d38da066306c5b8688d2927018/gistfile1.txt",
-                       }
+    reference_files = {
+        "wordlist.txt": "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt",
+        "sigmorphon_train.tsv": "https://raw.githubusercontent.com/sigmorphon/2022SegmentationST/main/data/eng.word.train.tsv",
+        "sigmorphon_dev.tsv": "https://raw.githubusercontent.com/sigmorphon/2022SegmentationST/main/data/eng.word.dev.tsv",
+        "aoa_ws_fit.csv": "https://gist.githubusercontent.com/craaaa/1c254cdc29bbe3f9ab25d66afc3ecfa3/raw/079968f76b94a1d38da066306c5b8688d2927018/gistfile1.txt",
+    }
     os.makedirs(PROJECT_ROOT / "data/references", exist_ok=True)
 
     for fname, url in reference_files.items():
         print(f"Getting {fname}")
         get_response = requests.get(url)
         if get_response.ok:
-            with open(PROJECT_ROOT / "data/references" / fname, 'w') as f:
+            with open(PROJECT_ROOT / "data/references" / fname, "w") as f:
                 f.write(get_response.text)
         else:
             print(f"Could not obtain {fname} from {url}")
 
     morphemes = set()
-    files = [PROJECT_ROOT / "data/references" / "sigmorphon_train.tsv",
-            PROJECT_ROOT / "data/references" / "sigmorphon_dev.tsv"
-            ]
+    files = [
+        PROJECT_ROOT / "data/references" / "sigmorphon_train.tsv",
+        PROJECT_ROOT / "data/references" / "sigmorphon_dev.tsv",
+    ]
     for fname in files:
-        with open(fname, 'r') as f:
+        with open(fname, "r") as f:
             for line in f:
                 word, morphs, _ = line.split("\t")
-                m = morphs.strip().replace("@@","").split(" ")
+                m = morphs.strip().replace("@@", "").split(" ")
                 morphemes.update(m)
 
-    with open(PROJECT_ROOT / "data/references" / "sigmorphon_morphemes.txt", 'w') as f:
+    with open(PROJECT_ROOT / "data/references" / "sigmorphon_morphemes.txt", "w") as f:
         for line in morphemes:
             f.write(line + "\n")
 
@@ -156,9 +150,9 @@ def download_data():
 def get_chars(example: Dataset) -> set:
     """Get all characters in dataset."""
     codepoints = set()
-    text = example["text"]
-    for char in text:
-        codepoints.add(unidecode(char).lower())
+    normalized_input = normalize_string(example["text"])
+    for char in normalized_input:
+        codepoints.add(normalize_string(char))
     return codepoints
 
 
@@ -178,7 +172,6 @@ def load_data(large_track: bool, subsample: int | None, seed: int) -> dict:
         }
 
     dataset = load_dataset("text", data_files=data_files)
-
     if subsample is not None:
         dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample))
         dataset["validation"] = (
@@ -186,7 +179,7 @@ def load_data(large_track: bool, subsample: int | None, seed: int) -> dict:
         )
         dataset["test"] = dataset["test"].shuffle(seed=seed).select(range(subsample))
 
-    num_workers = 8
+    num_workers = os.cpu_count()
     pool = Pool(processes=num_workers)
 
     train_chars = pool.map(get_chars, dataset["train"])
@@ -198,53 +191,6 @@ def load_data(large_track: bool, subsample: int | None, seed: int) -> dict:
         "dataset": dataset,
         "all_chars": all_chars,
     }
-
-
-def get_initial_tokenizer(unique_tokens: set[str]):
-    """Get char-level tokenizer."""
-    tokenizer_base = Tokenizer(WordLevel(unk_token=SpecialTokens.UNK))
-    # tokenizer_base.normalizer = normalizers.Sequence([
-    #     NFD(),
-    #     StripAccents(),
-    #     Lowercase()
-    # ])
-
-    tokenizer_base.pre_tokenizer = WhitespaceSplit()
-    tokenizer_base.add_special_tokens(SpecialTokens.values())
-    tokenizer_base.add_tokens(list(unique_tokens))
-
-    tokenizer_base.post_processor = TemplateProcessing(
-        single=f"{SpecialTokens.BOS} $A",
-        special_tokens=[
-            (SpecialTokens.BOS, tokenizer_base.token_to_id(SpecialTokens.BOS)),
-        ],
-    )
-
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=tokenizer_base,
-        bos_token=SpecialTokens.BOS,
-        eos_token=SpecialTokens.EOS,
-        unk_token=SpecialTokens.UNK,
-        pad_token=SpecialTokens.EOS,  # use [EOS] as [PAD]
-        mask_token=SpecialTokens.MASK,
-        sep_token=SpecialTokens.SEP,
-        cls_token=SpecialTokens.CLS,
-    )
-    tokenizer.add_special_tokens(
-        {
-            "pad_token": SpecialTokens.EOS,
-            "mask_token": SpecialTokens.MASK,
-            "sep_token": SpecialTokens.SEP,
-            "cls_token": SpecialTokens.CLS,
-            "unk_token": SpecialTokens.UNK,
-            "bos_token": SpecialTokens.BOS,
-            "eos_token": SpecialTokens.EOS,
-        }
-    )
-    tokenizer.padding_side = "left"
-    tokenizer.pad_token_id = tokenizer.eos_token_id
-
-    return tokenizer
 
 
 def merge_new_tokens(
@@ -321,11 +267,37 @@ def construct_dataset(
     all_chars = data["all_chars"]
 
     if tokenizer is None:
-        tokenizer = get_initial_tokenizer(all_chars)
+        tokenizer = CharacterTokenizer(all_chars, model_max_length=block_size)
     else:
-        tokenizer.add_tokens(list(all_chars))
+        """
+        If we already have a tokenzer, we want to construct an entirely new
+        tokenizer with the union of the old vocab and the new characters from
+        the dataset. However, we need to maintain the order of the old vocabulary
+        since otherwise the model will be seeing randomized tokens at every epoch.
 
-    # print(tokenizer)
+        To do this, we first strip out the special tokens from the old vocabulary.
+        Then we take the current vocab and make sure that it's ordered according to
+        it's token_id. We then remove these known tokens from the new characters,
+        and concatenate current_vocab with new_vocab.
+        """
+        current_specials = tokenizer.all_special_tokens
+        current_vocab = tokenizer.get_vocab()
+        current_vocab = dict(sorted(current_vocab.items(), key=lambda x: x[1]))
+        normal_vocab = {
+            k: v for k, v in current_vocab.items() if k not in current_specials
+        }
+
+        # print(current_vocab)
+        # print(normal_vocab)
+
+        new_chars = list(set(all_chars) - set(normal_vocab.keys()))
+
+        # print(new_chars)
+        new_chars = [k for k in normal_vocab] + new_chars
+
+        # print(new_chars)
+        # raise SystemExit
+        tokenizer = CharacterTokenizer(new_chars, model_max_length=block_size)
 
     preprocess_fn = partial(
         preprocess, tokenizer=tokenizer, trunc=not stack, max_len=block_size

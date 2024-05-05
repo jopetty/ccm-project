@@ -19,8 +19,8 @@ repos:
     - id: nbqa-black
     - id: nbqa-pyupgrade
       args: ["--py310-plus"]
-    - id: nbqa-isort
-      args: ["--float-to-top"]
+    # - id: nbqa-isort
+    #   args: ["--float-to-top"]
 - repo: https://github.com/kynan/nbstripout
   rev: 0.6.1
   hooks:
