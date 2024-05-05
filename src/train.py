@@ -70,7 +70,6 @@ def main(
     large_track: bool = False,
     subsample: int | None = None,
     stack_sequences: bool = True,
-    lower: bool = True,
     spacing: bool = False,
     # Miscellaneous
     output_dir: Path = PROJECT_ROOT / "outputs",
@@ -102,8 +101,7 @@ def main(
         block_size=block_size,
         stack=stack_sequences,
         tokenizer=None,
-        lower=lower,
-        spacing=spacing
+        spacing=spacing,
     )
 
     dataset = dataset_dict["dataset"]
@@ -195,7 +193,9 @@ def main(
 
     total_merge_probs = torch.zeros((len(tokenizer), len(tokenizer)))
     total_merge_counts = torch.zeros((len(tokenizer), len(tokenizer)), dtype=int)
-    alpha_toks = torch.tensor([idx for tok, idx in tokenizer.get_added_vocab().items() if tok.isalpha()])
+    alpha_toks = torch.tensor(
+        [idx for tok, idx in tokenizer.get_added_vocab().items() if tok.isalpha()]
+    )
     prev_merged = torch.full((len(tokenizer), len(tokenizer)), True, dtype=bool)
 
     data_seeds = sample(range(1, 100), num_epochs)
@@ -248,33 +248,52 @@ def main(
                     first_target[first_target == -100] = tokenizer.eos_token_id
                     first_logits = logits[0].argmax(dim=-1)
                     print("Vocab batch:")
-                    print(f"Target: {tokenizer.decode(first_target, skip_special_tokens=not stack_sequences)}")
-                    print(f"Prediction: {tokenizer.decode(first_logits, skip_special_tokens=not stack_sequences)}")
+                    print(
+                        f"Target: {
+                            tokenizer.decode(
+                                first_target,
+                                skip_special_tokens=not stack_sequences
+                        )}"
+                    )
+                    print(
+                        f"Prediction: {
+                            tokenizer.decode(
+                                first_logits,
+                                skip_special_tokens=not stack_sequences
+                        )}"
+                    )
 
                 if update_vocab:
                     target = target.flatten()
                     logits = logits.flatten(end_dim=-2)
                     loss = F.cross_entropy(logits, target, reduction="none")
 
-                    # update bigram prob and count tracker
-                    # (had to do this iteratively bc memory overhead was too large if
-                    # tensorized; hope its not too slow)
                     target_toks, probs = target[target >= 0], (-loss[target >= 0]).exp()
-
-                    #for w_i in range(1, target_toks.shape[0]):
-                    #    total_merge_probs[target_toks[w_i - 1], target_toks[w_i]] += probs[
-                    #        w_i
-                    #    ]
-                    #    total_merge_counts[target_toks[w_i - 1], target_toks[w_i]] += 1
-                    
-                    #new version iterates over all v_i in v, gets each w_j == v_i, then gets all w_j+1 and all p(w_j+1), sums all p(w_j+1) by vocab item, and adds them to the counter.
+                    """new version iterates over all v_i in v, gets each w_j == v_i,
+                       then gets all w_j+1 and all p(w_j+1), sums all p(w_j+1) by vocab
+                       item, and adds them to the counter.
+                    """
                     for v_i in alpha_toks:
-                        v_inds = (target_toks[:-1] == v_i) & (target_toks[1:].unsqueeze(1) == alpha_toks.unsqueeze(0)).any(dim=1) #inds of w_j == v_i and w_j+1 in V.
-                        if(v_inds.sum() > 0):
-                            next_tok_prob = probs[1:][v_inds] #prob of w_j+1
-                            next_tok_id = target_toks[1:][v_inds] #ind in vocab of w_j+1
-                            total_merge_probs[v_i] = total_merge_probs[v_i].scatter_add(dim=0, index=next_tok_id, src=next_tok_prob)
-                            total_merge_counts[v_i] = total_merge_counts[v_i].scatter_add(dim=0, index=next_tok_id, src=torch.ones((len(next_tok_prob)), dtype=int).to(device))
+                        v_inds = (target_toks[:-1] == v_i) & (
+                            target_toks[1:].unsqueeze(1) == alpha_toks.unsqueeze(0)
+                        ).any(dim=1)  # inds of w_j == v_i and w_j+1 in V.
+                        if v_inds.sum() > 0:
+                            next_tok_prob = probs[1:][v_inds]  # prob of w_j+1
+                            next_tok_id = target_toks[1:][
+                                v_inds
+                            ]  # ind in vocab of w_j+1
+                            total_merge_probs[v_i] = total_merge_probs[v_i].scatter_add(
+                                dim=0, index=next_tok_id, src=next_tok_prob
+                            )
+                            total_merge_counts[v_i] = total_merge_counts[
+                                v_i
+                            ].scatter_add(
+                                dim=0,
+                                index=next_tok_id,
+                                src=torch.ones((len(next_tok_prob)), dtype=int).to(
+                                    device
+                                ),
+                            )
             end = time.time()
             print(f"Time to evaluate: {end - start}")
 
@@ -298,8 +317,7 @@ def main(
                     block_size=block_size,
                     tokenizer=tokenizer,
                     stack=stack_sequences,
-                    lower=lower,
-                    spacing=spacing
+                    spacing=spacing,
                 )
                 old_vocab = tokenizer.get_vocab()
                 dataset = dataset_dict["dataset"]
@@ -309,21 +327,23 @@ def main(
                 omn = list(set(old_vocab.keys()) - set(new_vocab.keys()))
                 nmo = list(set(new_vocab.keys()) - set(old_vocab.keys()))
 
+                print("Characters added by new data samples:")
                 print(omn, nmo)
-
-                # raise SystemExit
 
                 # Pad total_merge_probs, total_merge_counts to match new tokenizer size
                 new_len = len(tokenizer)
                 old_len = total_merge_probs.shape[0]
-
                 total_merge_probs = F.pad(
                     total_merge_probs, (0, new_len - old_len, 0, new_len - old_len)
                 )
                 total_merge_counts = F.pad(
                     total_merge_counts, (0, new_len - old_len, 0, new_len - old_len)
                 )
-                prev_merged = F.pad(prev_merged, (0, new_len - old_len, 0, new_len - old_len), value=True)
+                prev_merged = F.pad(
+                    prev_merged,
+                    (0, new_len - old_len, 0, new_len - old_len),
+                    value=True,
+                )
 
                 tokenizer.save_pretrained(project_dir, filename_prefix=f"{e}")
 

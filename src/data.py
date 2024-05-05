@@ -6,8 +6,6 @@ import unicodedata
 import zipfile
 from functools import partial, reduce
 from multiprocessing import Pool
-import requests
-import re
 
 import pyrootutils
 import requests
@@ -44,7 +42,7 @@ class OSFArgs:
         self.update = True
 
 
-def normalize_string(s: str) -> str:
+def normalize_string(s: str, remove_spaces: bool) -> str:
     """Normalize a string."""
 
     def strip_accents(s: str) -> str:
@@ -58,7 +56,12 @@ def normalize_string(s: str) -> str:
     def collapse_spaces(s: str) -> str:
         return re.sub(r"\s+", " ", s)
 
+    def remove_spaces(s: str) -> str:
+        return re.sub(r"\s+", "", s)
+
     norm_maps = [strip_accents, lower, unidecode, collapse_spaces]
+    if remove_spaces:
+        norm_maps.append(remove_spaces)
 
     return reduce(lambda x, f: f(x), norm_maps, s)
 
@@ -68,29 +71,18 @@ def preprocess(
     tokenizer: PreTrainedTokenizerFast,
     trunc: bool = True,
     max_len: int = 512,
-    lower: bool = True,
-    spacing: bool = True
+    spacing: bool = True,
 ) -> DatasetDict:
     """Tokenize dataset."""
-    if(spacing and lower):
-        toks = [unidecode(x).lower() for x in examples["text"]]
-    elif(spacing):
-        toks = [unidecode(x) for x in examples["text"]]
-    elif(lower):
-        toks = [re.sub(r"\s+", "", unidecode(x).lower()) for x in examples["text"]]
-    else:
-        toks = [re.sub(r"\s+", "", unidecode(x)) for x in examples["text"]]
     if trunc:
         return tokenizer(
-            toks,
-#             [normalize_string(x) for x in examples["text"]],
-#             truncation=trunc,
-#             max_length=max_len,
+            [normalize_string(x, remove_spaces=spacing) for x in examples["text"]],
+            truncation=trunc,
+            max_length=max_len,
         )
     else:
         return tokenizer(
-            toks,
-#             [normalize_string(x) for x in examples["text"]],
+            [normalize_string(x, remove_spaces=spacing) for x in examples["text"]],
         )
 
 
@@ -221,20 +213,35 @@ def merge_new_tokens(
     # unigram probability of a token
     bigram_probs = total_merge_probs / total_merge_counts
     unigram_probs = total_merge_probs.sum(axis=0) / total_merge_counts.sum(axis=0)
-    merge_scores = (bigram_probs / unigram_probs) * total_merge_counts  # P(wi|wi-1)/ P(wi)
+    merge_scores = (
+        bigram_probs / unigram_probs
+    ) * total_merge_counts  # P(wi|wi-1)/ P(wi)
     merge_scores = torch.nan_to_num(merge_scores)
     merge_scores *= prev_merged
     # get top num_to_merge valid token pairs
     merge_scores_ranked = merge_scores.flatten().argsort(descending=True)
-    merge_scores_ranked = torch.stack((
-        merge_scores_ranked // merge_scores.shape[0],
-        merge_scores_ranked % merge_scores.shape[0],
-    ))
-    top_alphas = merge_scores_ranked[:,:num_to_merge]
-    new_toks = [tokenizer.decode(merge_scores_ranked[0,x]) + tokenizer.decode(merge_scores_ranked[1,x]) for x in range(top_alphas.shape[1])]
+    merge_scores_ranked = torch.stack(
+        (
+            merge_scores_ranked // merge_scores.shape[0],
+            merge_scores_ranked % merge_scores.shape[0],
+        )
+    )
+    top_alphas = merge_scores_ranked[:, :num_to_merge]
+    new_toks = [
+        tokenizer.decode(merge_scores_ranked[0, x])
+        + tokenizer.decode(merge_scores_ranked[1, x])
+        for x in range(top_alphas.shape[1])
+    ]
 
     # update counters
-    alpha_toks = torch.cat((alpha_toks, torch.arange(len(tokenizer), len(tokenizer) + len(new_toks), device=model.device)))
+    alpha_toks = torch.cat(
+        (
+            alpha_toks,
+            torch.arange(
+                len(tokenizer), len(tokenizer) + len(new_toks), device=model.device
+            ),
+        )
+    )
     prev_merged[top_alphas] = False
 
     # add tokens to tokenizer
@@ -261,8 +268,7 @@ def construct_dataset(
     subsample: int | None,
     stack: bool,
     tokenizer: PreTrainedTokenizerFast | None,
-    lower: bool,
-    spacing: bool
+    spacing: bool,
 ):
     """Construct BabyLM dataset and initial tokenizer."""
     # Check if PROJECT_ROOT / data has more than a single .gitkeep file in it
@@ -293,21 +299,16 @@ def construct_dataset(
         normal_vocab = {
             k: v for k, v in current_vocab.items() if k not in current_specials
         }
-
-        # print(current_vocab)
-        # print(normal_vocab)
-
         new_chars = list(set(all_chars) - set(normal_vocab.keys()))
-
-        # print(new_chars)
         new_chars = [k for k in normal_vocab] + new_chars
-
-        # print(new_chars)
-        # raise SystemExit
         tokenizer = CharacterTokenizer(new_chars, model_max_length=block_size)
 
     preprocess_fn = partial(
-        preprocess, tokenizer=tokenizer, trunc=not stack, max_len=block_size, lower=lower, spacing=spacing
+        preprocess,
+        tokenizer=tokenizer,
+        trunc=not stack,
+        max_len=block_size,
+        spacing=spacing,
     )
     dataset = dataset.map(
         preprocess_fn,
