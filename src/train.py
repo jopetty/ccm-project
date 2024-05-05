@@ -70,7 +70,7 @@ def main(
     large_track: bool = False,
     subsample: int | None = None,
     stack_sequences: bool = True,
-    spacing: bool = False,
+    remove_spaces: bool = False,
     # Miscellaneous
     output_dir: Path = PROJECT_ROOT / "outputs",
     seed: int = randint(0, 2**32 - 1),
@@ -101,7 +101,7 @@ def main(
         block_size=block_size,
         stack=stack_sequences,
         tokenizer=None,
-        spacing=spacing,
+        remove_spaces=remove_spaces,
     )
 
     dataset = dataset_dict["dataset"]
@@ -133,6 +133,7 @@ def main(
         "project_dir": str(project_dir),
         "seed": seed,
         "subsample": subsample,
+        "remove_spaces": remove_spaces,
         "stack_sequences": stack_sequences,
         "weight_decay": weight_decay,
         "update_vocab_every": update_vocab_every,
@@ -317,7 +318,7 @@ def main(
                     block_size=block_size,
                     tokenizer=tokenizer,
                     stack=stack_sequences,
-                    spacing=spacing,
+                    remove_spaces=remove_spaces,
                 )
                 old_vocab = tokenizer.get_vocab()
                 dataset = dataset_dict["dataset"]

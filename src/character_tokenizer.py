@@ -48,7 +48,13 @@ class SpecialTokens(StrEnum):
 
 
 class CharacterTokenizer(PreTrainedTokenizerFast):
-    def __init__(self, characters: Sequence[str], model_max_length: int, **kwargs):
+    def __init__(
+        self,
+        characters: Sequence[str],
+        model_max_length: int,
+        split_on_whitespace: bool = True,
+        **kwargs,
+    ):
         """Character tokenizer for Hugging Face transformers.
 
         Args:
@@ -58,6 +64,8 @@ class CharacterTokenizer(PreTrainedTokenizerFast):
                 indexed in the vocabulary!
 
             model_max_length (int): Model maximum sequence length.
+
+            split_on_whitespace (bool): Include a Whitespace pre-tokenizer.
         """
 
         vocab_dict = SpecialTokens.as_dict() | {
@@ -69,7 +77,8 @@ class CharacterTokenizer(PreTrainedTokenizerFast):
         tokenizer_base.normalizer = normalizers.Sequence(
             [NFD(), StripAccents(), Lowercase()]
         )
-        tokenizer_base.pre_tokenizer = Whitespace()
+        if split_on_whitespace:
+            tokenizer_base.pre_tokenizer = Whitespace()
         tokenizer_base.post_processor = TemplateProcessing(
             single=f"{SpecialTokens.BOS} $A",
             special_tokens=[

@@ -56,12 +56,12 @@ def normalize_string(s: str, remove_spaces: bool) -> str:
     def collapse_spaces(s: str) -> str:
         return re.sub(r"\s+", " ", s)
 
-    def remove_spaces(s: str) -> str:
+    def removing_spaces(s: str) -> str:
         return re.sub(r"\s+", "", s)
 
     norm_maps = [strip_accents, lower, unidecode, collapse_spaces]
     if remove_spaces:
-        norm_maps.append(remove_spaces)
+        norm_maps.append(removing_spaces)
 
     return reduce(lambda x, f: f(x), norm_maps, s)
 
@@ -71,18 +71,24 @@ def preprocess(
     tokenizer: PreTrainedTokenizerFast,
     trunc: bool = True,
     max_len: int = 512,
-    spacing: bool = True,
+    remove_spaces: bool = False,
 ) -> DatasetDict:
     """Tokenize dataset."""
     if trunc:
         return tokenizer(
-            [normalize_string(x, remove_spaces=spacing) for x in examples["text"]],
+            [
+                normalize_string(x, remove_spaces=remove_spaces)
+                for x in examples["text"]
+            ],
             truncation=trunc,
             max_length=max_len,
         )
     else:
         return tokenizer(
-            [normalize_string(x, remove_spaces=spacing) for x in examples["text"]],
+            [
+                normalize_string(x, remove_spaces=remove_spaces)
+                for x in examples["text"]
+            ],
         )
 
 
@@ -156,13 +162,15 @@ def download_data():
 def get_chars(example: Dataset) -> set:
     """Get all characters in dataset."""
     codepoints = set()
-    normalized_input = normalize_string(example["text"])
+    normalized_input = normalize_string(example["text"], remove_spaces=False)
     for char in normalized_input:
-        codepoints.add(normalize_string(char))
+        codepoints.add(normalize_string(char, remove_spaces=False))
     return codepoints
 
 
-def load_data(large_track: bool, subsample: int | None, seed: int) -> dict:
+def load_data(
+    large_track: bool, subsample: int | None, seed: int, remove_spaces: bool
+) -> dict:
     """Load BabyLM data into HF dataset object."""
     if large_track:
         data_files = {
@@ -192,6 +200,11 @@ def load_data(large_track: bool, subsample: int | None, seed: int) -> dict:
     val_chars = pool.map(get_chars, dataset["validation"])
     test_chars = pool.map(get_chars, dataset["test"])
     all_chars = set.union(*train_chars, *val_chars, *test_chars)
+
+    if remove_spaces and " " in all_chars:
+        # Don't want to accidentally add-in spaces that will never be seen in
+        # the processed data.
+        all_chars.remove(" ")
 
     return {
         "dataset": dataset,
@@ -268,19 +281,28 @@ def construct_dataset(
     subsample: int | None,
     stack: bool,
     tokenizer: PreTrainedTokenizerFast | None,
-    spacing: bool,
+    remove_spaces: bool,
 ):
     """Construct BabyLM dataset and initial tokenizer."""
     # Check if PROJECT_ROOT / data has more than a single .gitkeep file in it
     if not len(list(PROJECT_ROOT.glob("data/*"))) > 1:
         download_data()
 
-    data = load_data(large_track=large_track, subsample=subsample, seed=seed)
+    data = load_data(
+        large_track=large_track,
+        subsample=subsample,
+        seed=seed,
+        remove_spaces=remove_spaces,
+    )
     dataset = data["dataset"]
     all_chars = data["all_chars"]
 
     if tokenizer is None:
-        tokenizer = CharacterTokenizer(all_chars, model_max_length=block_size)
+        tokenizer = CharacterTokenizer(
+            all_chars,
+            model_max_length=block_size,
+            split_on_whitespace=not remove_spaces,
+        )
     else:
         """
         If we already have a tokenzer, we want to construct an entirely new
@@ -301,14 +323,18 @@ def construct_dataset(
         }
         new_chars = list(set(all_chars) - set(normal_vocab.keys()))
         new_chars = [k for k in normal_vocab] + new_chars
-        tokenizer = CharacterTokenizer(new_chars, model_max_length=block_size)
+        tokenizer = CharacterTokenizer(
+            new_chars,
+            model_max_length=block_size,
+            split_on_whitespace=not remove_spaces,
+        )
 
     preprocess_fn = partial(
         preprocess,
         tokenizer=tokenizer,
         trunc=not stack,
         max_len=block_size,
-        spacing=spacing,
+        remove_spaces=remove_spaces,
     )
     dataset = dataset.map(
         preprocess_fn,
