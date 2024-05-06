@@ -165,4 +165,5 @@ wandb/
 src/.DS_Store
 .vscode/launch.json
 
-overlay-15GB-500K.ext3.gz
+overlay-15GB-500K.ext3*
+.cache/

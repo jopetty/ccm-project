@@ -74,7 +74,8 @@ def main(
     large_track: bool = False,
     subsample: int | None = None,
     stack_sequences: bool = True,
-    remove_spaces: bool = False,
+    allow_merge_across_space: bool = False,
+
     # Miscellaneous
     output_dir: Path = PROJECT_ROOT / "outputs",
     seed: int = randint(0, 2**32 - 1),
@@ -105,7 +106,7 @@ def main(
         block_size=block_size,
         stack=stack_sequences,
         tokenizer=None,
-        remove_spaces=remove_spaces,
+        allow_merge_across_space=allow_merge_across_space
     )
 
     dataset = dataset_dict["dataset"]
@@ -137,7 +138,7 @@ def main(
         "project_dir": str(project_dir),
         "seed": seed,
         "subsample": subsample,
-        "remove_spaces": remove_spaces,
+        "allow_merge_across_space": allow_merge_across_space,
         "stack_sequences": stack_sequences,
         "weight_decay": weight_decay,
         "update_vocab_every": update_vocab_every,
@@ -203,7 +204,7 @@ def main(
     )
     prev_merged = torch.full((len(tokenizer), len(tokenizer)), True, dtype=bool)
 
-    data_seeds = sample(range(1, 100), num_epochs)
+    data_seeds = sample(range(0, 2**32 - 1), num_epochs)
 
     vocabs = []
 
@@ -326,7 +327,7 @@ def main(
                     block_size=block_size,
                     tokenizer=tokenizer,
                     stack=stack_sequences,
-                    remove_spaces=remove_spaces,
+                    allow_merge_across_space=allow_merge_across_space
                 )
                 old_vocab = tokenizer.get_vocab()
                 dataset = dataset_dict["dataset"]
@@ -375,7 +376,7 @@ def main(
         if accelerator.is_main_process:
             print("Yay")
             wandb_tracker.log({"vocab": vocab_table})
-            wandb_tracker.log_artifact(vocab_artifact)
+            # wandb_tracker.log_artifact(vocab_artifact)
 
     accelerator.end_training()
     model.save_pretrained(project_dir)

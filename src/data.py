@@ -6,6 +6,7 @@ import unicodedata
 import zipfile
 from functools import partial, reduce
 from multiprocessing import Pool
+import string
 
 import pyrootutils
 import requests
@@ -42,7 +43,7 @@ class OSFArgs:
         self.update = True
 
 
-def normalize_string(s: str, remove_spaces: bool) -> str:
+def normalize_string(s: str, remove_all_spaces: bool = False) -> str:
     """Normalize a string."""
 
     def strip_accents(s: str) -> str:
@@ -55,13 +56,13 @@ def normalize_string(s: str, remove_spaces: bool) -> str:
 
     def collapse_spaces(s: str) -> str:
         return re.sub(r"\s+", " ", s)
-
-    def removing_spaces(s: str) -> str:
+    
+    def remove_spaces(s: str) -> str:
         return re.sub(r"\s+", "", s)
 
     norm_maps = [strip_accents, lower, unidecode, collapse_spaces]
-    if remove_spaces:
-        norm_maps.append(removing_spaces)
+    if remove_all_spaces:
+        norm_maps.append(remove_spaces)
 
     return reduce(lambda x, f: f(x), norm_maps, s)
 
@@ -71,13 +72,13 @@ def preprocess(
     tokenizer: PreTrainedTokenizerFast,
     trunc: bool = True,
     max_len: int = 512,
-    remove_spaces: bool = False,
+    remove_all_spaces: bool = False
 ) -> DatasetDict:
     """Tokenize dataset."""
     if trunc:
         return tokenizer(
             [
-                normalize_string(x, remove_spaces=remove_spaces)
+                normalize_string(x, remove_all_spaces=remove_all_spaces)
                 for x in examples["text"]
             ],
             truncation=trunc,
@@ -86,7 +87,7 @@ def preprocess(
     else:
         return tokenizer(
             [
-                normalize_string(x, remove_spaces=remove_spaces)
+                normalize_string(x, remove_all_spaces=remove_all_spaces)
                 for x in examples["text"]
             ],
         )
@@ -103,7 +104,7 @@ def stack_sequences(examples: DatasetDict, block_size: int):
     return result
 
 
-def load_references():
+def download_references():
     """Download and format reference data."""
     reference_files = {
         "wordlist.txt": "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt",
@@ -162,14 +163,17 @@ def download_data():
 def get_chars(example: Dataset) -> set:
     """Get all characters in dataset."""
     codepoints = set()
-    normalized_input = normalize_string(example["text"], remove_spaces=False)
+    normalized_input = normalize_string(example["text"])
     for char in normalized_input:
-        codepoints.add(normalize_string(char, remove_spaces=False))
+        codepoints.add(normalize_string(char))
     return codepoints
 
 
 def load_data(
-    large_track: bool, subsample: int | None, seed: int, remove_spaces: bool
+    large_track: bool,
+    subsample: int | None,
+    seed: int,
+    include_space_in_vocab: bool,
 ) -> dict:
     """Load BabyLM data into HF dataset object."""
     if large_track:
@@ -185,7 +189,7 @@ def load_data(
             "test": str(PROJECT_ROOT / "data" / "test/*.test"),
         }
 
-    dataset = load_dataset("text", data_files=data_files)
+    dataset = load_dataset("text", data_files=data_files, cache_dir=".cache")
     if subsample is not None:
         dataset["train"] = dataset["train"].shuffle(seed=seed).select(range(subsample))
         dataset["validation"] = (
@@ -193,18 +197,21 @@ def load_data(
         )
         dataset["test"] = dataset["test"].shuffle(seed=seed).select(range(subsample))
 
-    num_workers = os.cpu_count()
-    pool = Pool(processes=num_workers)
+    # num_workers = os.cpu_count()
+    # pool = Pool(processes=num_workers)
 
-    train_chars = pool.map(get_chars, dataset["train"])
-    val_chars = pool.map(get_chars, dataset["validation"])
-    test_chars = pool.map(get_chars, dataset["test"])
-    all_chars = set.union(*train_chars, *val_chars, *test_chars)
+    # train_chars = pool.map(get_chars, dataset["train"])
+    # val_chars = pool.map(get_chars, dataset["validation"])
+    # test_chars = pool.map(get_chars, dataset["test"])
+    # all_chars = set.union(*train_chars, *val_chars, *test_chars)
+    # all_chars = set([chr(i) for i in range(128)])
+    all_chars = set(string.printable) - set('\t\n\r\x0b\x0c')
+    all_chars = set([normalize_string(c) for c in all_chars])
 
-    if remove_spaces and " " in all_chars:
-        # Don't want to accidentally add-in spaces that will never be seen in
-        # the processed data.
-        all_chars.remove(" ")
+    if include_space_in_vocab:
+        all_chars |= set(" ")
+    else:
+        all_chars -= set(" ")
 
     return {
         "dataset": dataset,
@@ -310,7 +317,7 @@ def construct_dataset(
     subsample: int | None,
     stack: bool,
     tokenizer: PreTrainedTokenizerFast | None,
-    remove_spaces: bool,
+    allow_merge_across_space: bool,
 ):
     """Construct BabyLM dataset and initial tokenizer."""
     # Check if PROJECT_ROOT / data has more than a single .gitkeep file in it
@@ -321,7 +328,7 @@ def construct_dataset(
         large_track=large_track,
         subsample=subsample,
         seed=seed,
-        remove_spaces=remove_spaces,
+        include_space_in_vocab=not allow_merge_across_space,
     )
     dataset = data["dataset"]
     all_chars = data["all_chars"]
@@ -330,7 +337,7 @@ def construct_dataset(
         tokenizer = CharacterTokenizer(
             all_chars,
             model_max_length=block_size,
-            split_on_whitespace=not remove_spaces,
+            split_on_whitespace=not allow_merge_across_space,
         )
     else:
         """
@@ -354,7 +361,7 @@ def construct_dataset(
         tokenizer = CharacterTokenizer(
             new_chars,
             model_max_length=block_size,
-            split_on_whitespace=not remove_spaces,
+            split_on_whitespace=not allow_merge_across_space,
         )
 
     preprocess_fn = partial(
@@ -362,7 +369,7 @@ def construct_dataset(
         tokenizer=tokenizer,
         trunc=not stack,
         max_len=block_size,
-        remove_spaces=remove_spaces,
+        remove_all_spaces=allow_merge_across_space,
     )
     dataset = dataset.map(
         preprocess_fn,
@@ -386,5 +393,5 @@ def construct_dataset(
 
 
 if __name__ == "__main__":
-    load_references()
-    load_data()
+    download_references()
+    download_data()
