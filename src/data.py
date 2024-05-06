@@ -236,9 +236,7 @@ def merge_new_tokens(
     # index corresponds to a token that is not an alphabetic character.
     # This ensures that all valid pairs are ranked ahead of invalid pairs.
     current_specials = tokenizer.all_special_tokens
-    current_vocab = list(
-        dict(sorted(tokenizer.get_vocab().items(), key=lambda x: x[1])).keys()
-    )
+    current_vocab = list(tokenizer.get_sorted_vocab().keys())
     valid_to_merge = torch.tensor(
         [
             # With a CharacterTokenizer this second check is unnecessary,
@@ -347,8 +345,7 @@ def construct_dataset(
         and concatenate current_vocab with new_vocab.
         """
         current_specials = tokenizer.all_special_tokens
-        current_vocab = tokenizer.get_vocab()
-        current_vocab = dict(sorted(current_vocab.items(), key=lambda x: x[1]))
+        current_vocab = tokenizer.get_sorted_vocab()
         normal_vocab = {
             k: v for k, v in current_vocab.items() if k not in current_specials
         }

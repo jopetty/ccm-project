@@ -3,12 +3,15 @@
 import json
 import logging
 import os
+import pprint
+import statistics
 import time
 from datetime import datetime
 from pathlib import Path
 from random import randint, sample
 
 import fire
+import pandas as pd
 import pyrootutils
 import torch
 import torch.nn.functional as F  # noqa: N812
@@ -25,6 +28,7 @@ from transformers import (
     TrainingArguments,
 )
 
+import wandb
 from data import construct_dataset, merge_new_tokens
 
 logging.basicConfig(
@@ -80,8 +84,8 @@ def main(
     """Train models."""
     set_seed(seed)
 
-    # accelerator = Accelerator(log_with="wandb") if logging else Accelerator()
-    accelerator = Accelerator()
+    accelerator = Accelerator(log_with="wandb") if logging else Accelerator()
+    # accelerator = Accelerator()
 
     # create project directory inside output_dir based on the timestamp
     # plus a two-character random string
@@ -145,7 +149,7 @@ def main(
         config=project_hps,
     )
 
-    print(f"Config: {project_hps}")
+    log.info(f"Config: {pprint.pformat(project_hps)}")
     # log.info(f"Dataset: {dataset}")
 
     with open(project_dir / "project_hps.json", "w") as f:
@@ -201,6 +205,8 @@ def main(
 
     data_seeds = sample(range(1, 100), num_epochs)
 
+    vocabs = []
+
     for e in range(num_epochs):
         print("#####################################")
         print(f"Epoch: {e}")
@@ -237,6 +243,7 @@ def main(
         vocab_dataloader = accelerator.prepare(vocab_dataloader)
 
         model.eval()
+        val_losses = []
         with torch.no_grad():
             start = time.time()
             for idx, v_batch in enumerate(vocab_dataloader):
@@ -268,6 +275,7 @@ def main(
                     target = target.flatten()
                     logits = logits.flatten(end_dim=-2)
                     loss = F.cross_entropy(logits, target, reduction="none")
+                    val_losses.append(loss.mean().item())
 
                     target_toks, probs = target[target >= 0], (-loss[target >= 0]).exp()
                     """new version iterates over all v_i in v, gets each w_j == v_i,
@@ -348,6 +356,28 @@ def main(
 
                 tokenizer.save_pretrained(project_dir, filename_prefix=f"{e}")
 
+        res_dict = {
+            "eval/loss": statistics.fmean(val_losses),
+            "train/loss": trainer.state.log_history[-1]["train_loss"],
+            "vocab_size": len(tokenizer),
+        }
+        accelerator.log(res_dict, step=e * per_device_batch_size)
+        vocabs.append(json.dumps(tokenizer.get_sorted_vocab()))
+
+    vocab_df = pd.DataFrame([[v] for v in vocabs], columns=["vocab"])
+    print(vocab_df)
+    vocab_table = wandb.Table(dataframe=vocab_df)
+    vocab_artifact = wandb.Artifact("vocab", type="vocab")
+    vocab_artifact.add(vocab_table, "vocab")
+
+    if logging:
+        wandb_tracker = accelerator.get_tracker("wandb", unwrap=True)
+        if accelerator.is_main_process:
+            print("Yay")
+            wandb_tracker.log({"vocab": vocab_table})
+            wandb_tracker.log_artifact(vocab_artifact)
+
+    accelerator.end_training()
     model.save_pretrained(project_dir)
 
 
