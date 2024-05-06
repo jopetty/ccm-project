@@ -3,6 +3,8 @@
 import json
 import logging
 import os
+import pprint
+import statistics
 import time
 from datetime import datetime
 from pathlib import Path
@@ -80,8 +82,8 @@ def main(
     """Train models."""
     set_seed(seed)
 
-    # accelerator = Accelerator(log_with="wandb") if logging else Accelerator()
-    accelerator = Accelerator()
+    accelerator = Accelerator(log_with="wandb") if logging else Accelerator()
+    # accelerator = Accelerator()
 
     # create project directory inside output_dir based on the timestamp
     # plus a two-character random string
@@ -145,7 +147,7 @@ def main(
         config=project_hps,
     )
 
-    print(f"Config: {project_hps}")
+    log.info(f"Config: {pprint.pformat(project_hps)}")
     # log.info(f"Dataset: {dataset}")
 
     with open(project_dir / "project_hps.json", "w") as f:
@@ -237,6 +239,7 @@ def main(
         vocab_dataloader = accelerator.prepare(vocab_dataloader)
 
         model.eval()
+        val_losses = []
         with torch.no_grad():
             start = time.time()
             for idx, v_batch in enumerate(vocab_dataloader):
@@ -268,6 +271,7 @@ def main(
                     target = target.flatten()
                     logits = logits.flatten(end_dim=-2)
                     loss = F.cross_entropy(logits, target, reduction="none")
+                    val_losses.append(loss.mean().item())
 
                     target_toks, probs = target[target >= 0], (-loss[target >= 0]).exp()
                     """new version iterates over all v_i in v, gets each w_j == v_i,
@@ -348,6 +352,14 @@ def main(
 
                 tokenizer.save_pretrained(project_dir, filename_prefix=f"{e}")
 
+        res_dict = {
+            "eval/loss": statistics.fmean(val_losses),
+            "train/loss": trainer.state.log_history[-1]["train_loss"],
+            "vocab_size": len(tokenizer),
+        }
+        accelerator.log(res_dict, step=e * per_device_batch_size)
+
+    accelerator.end_training()
     model.save_pretrained(project_dir)
 
 
