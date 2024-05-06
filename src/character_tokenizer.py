@@ -101,3 +101,6 @@ class CharacterTokenizer(PreTrainedTokenizerFast):
         )
 
         self.add_tokens(list(characters))
+
+    def get_sorted_vocab(self):
+        return dict(sorted(self.get_vocab().items(), key=lambda x: x[1]))

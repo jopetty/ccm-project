@@ -11,6 +11,7 @@ from pathlib import Path
 from random import randint, sample
 
 import fire
+import pandas as pd
 import pyrootutils
 import torch
 import torch.nn.functional as F  # noqa: N812
@@ -27,6 +28,7 @@ from transformers import (
     TrainingArguments,
 )
 
+import wandb
 from data import construct_dataset, merge_new_tokens
 
 logging.basicConfig(
@@ -203,6 +205,8 @@ def main(
 
     data_seeds = sample(range(1, 100), num_epochs)
 
+    vocabs = []
+
     for e in range(num_epochs):
         print("#####################################")
         print(f"Epoch: {e}")
@@ -358,6 +362,20 @@ def main(
             "vocab_size": len(tokenizer),
         }
         accelerator.log(res_dict, step=e * per_device_batch_size)
+        vocabs.append(json.dumps(tokenizer.get_sorted_vocab()))
+
+    vocab_df = pd.DataFrame([[v] for v in vocabs], columns=["vocab"])
+    print(vocab_df)
+    vocab_table = wandb.Table(dataframe=vocab_df)
+    vocab_artifact = wandb.Artifact("vocab", type="vocab")
+    vocab_artifact.add(vocab_table, "vocab")
+
+    if logging:
+        wandb_tracker = accelerator.get_tracker("wandb", unwrap=True)
+        if accelerator.is_main_process:
+            print("Yay")
+            wandb_tracker.log({"vocab": vocab_table})
+            wandb_tracker.log_artifact(vocab_artifact)
 
     accelerator.end_training()
     model.save_pretrained(project_dir)
