@@ -231,6 +231,28 @@ def merge_new_tokens(
     ) * total_merge_counts  # P(wi|wi-1)/ P(wi)
     merge_scores = torch.nan_to_num(merge_scores)
     merge_scores *= prev_merged
+
+    # zero out the merge_score for every row-column pair where either
+    # index corresponds to a token that is not an alphabetic character.
+    # This ensures that all valid pairs are ranked ahead of invalid pairs.
+    current_specials = tokenizer.all_special_tokens
+    current_vocab = list(
+        dict(sorted(tokenizer.get_vocab().items(), key=lambda x: x[1])).keys()
+    )
+    valid_to_merge = torch.tensor(
+        [
+            # With a CharacterTokenizer this second check is unnecessary,
+            # but we include it in case the tokenizer is every changed to
+            # allow fully-alphabet special tokens.
+            x.isalpha() and x not in current_specials
+            for x in current_vocab
+        ],
+        dtype=torch.bool,
+        device=model.device,
+    )
+    merge_scores[~valid_to_merge, :] = 0
+    merge_scores[:, ~valid_to_merge] = 0
+
     # get top num_to_merge valid token pairs
     merge_scores_ranked = merge_scores.flatten().argsort(descending=True)
     merge_scores_ranked = torch.stack(
@@ -240,6 +262,15 @@ def merge_new_tokens(
         )
     )
     top_alphas = merge_scores_ranked[:, :num_to_merge]
+
+    # We filter again based on mergeability to ensure that we only every merge
+    # the top min(num_to_merge, # of valid pairs) tokens, just in case we're
+    # in a position where there are fewer than num_to_merge valid pairs.
+    top_alphas = top_alphas[
+        :,
+        torch.logical_and(valid_to_merge[top_alphas[0]], valid_to_merge[top_alphas[1]]),
+    ]
+
     new_toks = [
         tokenizer.decode(merge_scores_ranked[0, x])
         + tokenizer.decode(merge_scores_ranked[1, x])
