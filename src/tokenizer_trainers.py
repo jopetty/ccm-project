@@ -124,8 +124,11 @@ def get_desired_vocab_size(
 
     # if we are growing the vocabulary linearly
     if num_vocab_merges_per_step is not None:
-        return min(
-            len(initial_alphabet) + step * num_vocab_merges_per_step, max_vocab_size
+        return max(
+            min(
+                len(initial_alphabet) + step * num_vocab_merges_per_step, max_vocab_size
+            ),
+            len(initial_alphabet),
         )
 
     # if we are growing the vocab exponentially
