@@ -177,7 +177,7 @@ def main(
         large_track=large_track,
         subsample=subsample,
         seed=seed,
-        remove_spaces=not split_on_space,
+        include_space_in_vocab=not split_on_space,
     )
     dataset = data["dataset"]["train"]
     all_chars = data["all_chars"]
