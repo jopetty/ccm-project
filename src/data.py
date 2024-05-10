@@ -103,7 +103,7 @@ def stack_sequences(examples: DatasetDict, block_size: int):
     return result
 
 
-def load_references():
+def download_references():
     """Download and format reference data."""
     reference_files = {
         "wordlist.txt": "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt",
@@ -386,5 +386,5 @@ def construct_dataset(
 
 
 if __name__ == "__main__":
-    load_references()
-    load_data()
+    download_references()
+    download_data()

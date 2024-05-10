@@ -188,6 +188,7 @@ def main(
         "bpe_batches": bpe_batches if incremental else 1,
         "large_track": large_track,
         "subsample": subsample,
+        "project_dir": str(project_dir),
     }
 
     print(f"Config: {pformat(tokenizer_hps)}")
