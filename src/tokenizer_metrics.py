@@ -359,7 +359,8 @@ class SplitsOnSpace(SingleTokenizerMetric):
         with open(text_file, "r") as f:
             lines = f.readlines()
             return [
-                normalize_string(line.strip(), remove_spaces=False) for line in lines
+                normalize_string(line.strip(), remove_all_spaces=False)
+                for line in lines
             ]
 
     def check_spaces(self, test: str, baseline: str) -> list[int, int]:
