@@ -39,7 +39,6 @@ extend-exclude = ["data/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N"]
-# ignore = ["D107"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

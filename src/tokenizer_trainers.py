@@ -232,13 +232,6 @@ def main(
             split_on_space=split_on_space,
         )
 
-        # if subsample is not None:
-        #     train_data = dataset=dataset["text"][s:e]
-        #     print(train_data)
-        #     train_data = train_data.select(range(subsample))
-        #     print(train_data)
-        #     raise SystemExit
-
         train_data = dataset["text"][s:e]
 
         trainer.train(dataset=train_data, initial_alphabet=previous_alphabet)
