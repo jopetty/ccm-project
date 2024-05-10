@@ -11,6 +11,9 @@ from scipy.stats import spearmanr
 from tokenizers import Tokenizer
 from tokenizers.decoders import ByteLevel
 from tokenizers.normalizers import NFD, Lowercase, Sequence, StripAccents
+from tqdm import tqdm
+
+from data import normalize_string
 
 PROJECT_ROOT = path = pyrootutils.find_root(
     search_from=__file__, indicator=".project-root"
@@ -334,100 +337,13 @@ class SplitsOnSpace(SingleTokenizerMetric):
         self.pretokenizer = ByteLevel(add_prefix_space=False, use_regex=False)
 
     def calculate(self) -> float:
-        def replace_bytes(str):
-            str = str.replace("Ģĵ", "–")
-            str = str.replace("â|ģ|Ħ", "⁄")
-            str = str.replace("âĢ|ĭ", "")
-            str = str.replace("âĢİ", "")
-            str = str.replace("âĢ|Ń", "")
-            str = str.replace("Ã¸", "ø")
-            str = str.replace("âĢķ", "―")
-            str = str.replace("Â|«", "«")
-            str = str.replace("ï¿½", "�")
-            str = str.replace("Ģ²", "′")
-            str = str.replace("ĢĻ", "’")
-            str = str.replace("âĢ|ŀ", "„")
-            str = str.replace("±", "ı")
-            str = str.replace("ĢĶ", "—")
-            str = str.replace("Ģľ", "“")
-            str = str.replace("ß", "z-")
-            str = str.replace("Ł", "ß")
-            str = str.replace("Ģŀ", "„")
-            str = str.replace("ĢĿ", "”")
-            str = str.replace("Ã¦", "æ")
-            str = str.replace("Ê|»", "ʻ")
-            str = str.replace("Ģĺ", "‘")
-            str = str.replace("Ī", "−1")
-            str = str.replace("Å|ĵ", "œ")
-            str = str.replace("Ģĺ", "‘")
-            str = str.replace("−1|Ĵ", "−")
-            str = str.replace("â–", "–")
-            str = str.replace("â′", "′")
-            str = str.replace("â′", "′")
-            str = str.replace("Â°", "°")
-            str = str.replace("â’", "’")
-            str = str.replace("Ä|ı", "ı")
-            str = str.replace("Äı", "ı")
-            str = str.replace("â“", "“")
-            str = str.replace("Ã|ß", "ß")
-            str = str.replace("Ãß", "ß")
-            str = str.replace("â—", "—")
-            str = str.replace("Â£", "£")
-            str = str.replace("â“", "“")
-            str = str.replace("Â|ı", "±")
-            str = str.replace("Âı", "±")
-            str = str.replace("Ê|¿", "ʿ")
-            str = str.replace("Ê¿", "ʿ")
-            str = str.replace("â”", "”")
-            str = str.replace("â|−", "−")
-            str = str.replace("â‘", "‘")
-            str = str.replace("Ë|Ĳ", "ː")
-            str = str.replace("Ç|ĥ", "ǃ")
-            str = str.replace("Ã|Ĺ", "×")
-            str = str.replace("Ä|§", "ħ")
-            str = str.replace("âĻ|¯", "♯")
-            str = str.replace("Â|¥", "¥")
-            str = str.replace("Â|·", "·")
-            str = str.replace("â|Ĥ|¬", "€")
-            str = str.replace("Ã|¾", "þ")
-            str = str.replace("Ä|ĳ", "đ")
-            str = str.replace("Ä|ĳ", "")
-            str = str.replace("Ã|°", "ð")
-            str = str.replace("âĢ|ļ", "‚")
-            str = str.replace("ÅĤ", "ł")
-            str = str.replace("−1|ĥ", "∃")
-            str = str.replace("−1|Ģ", "∀")
-            str = str.replace("Â|§", "§")
-            str = str.replace("ã|Ģ|ģ", "、")
-            str = str.replace("â|ĭ|¯", "⋯")
-            str = str.replace("â|Ĭ|Ĩ", "⊆")
-            str = str.replace("âĢ|ł", "†")
-            str = str.replace("|É|Ľ|", "ɛ")
-            str = str.replace("Â|»", "»")
-            str = str.replace("â|Ĥ|¤", "₤")
-            str = str.replace("Â|®", "®")
-            str = str.replace("−1|ŀ", "∞")
-            str = str.replace("É|Ļ", "ə")
-            str = str.replace("Â|Ń", "")
-            str = str.replace("Ã|·", "÷")
-            str = str.replace("âĢ|Ĳ", "‐")
-            str = str.replace("âĢ¢", "•")
-            str = str.replace("|âĢ|¬|", "")
-            str = str.replace("à|¥", "।")
-            str = str.replace("ã|ĥ", "ー")
-            str = str.replace("ã|ĥ", "・")
-            str = str.replace("|âĢ|¬|", "")
-
-            return str
-
         spaces_kept = 0
         total_spaces = 0
-        for line in self.test_sentences:
+        for line in tqdm(self.test_sentences):
             tokenized_line = remove_tokenizer_formatting(
                 self.tokenizer.encode(line, add_special_tokens=False).tokens
             )
             tokenized = "|".join(tokenized_line).strip()
-            tokenized = replace_bytes(tokenized)
             space_split = re.sub(
                 r"\s+", "|", self.normalizer.normalize_str(line)
             ).strip()
@@ -442,7 +358,9 @@ class SplitsOnSpace(SingleTokenizerMetric):
     def read_text_file(self, text_file):
         with open(text_file, "r") as f:
             lines = f.readlines()
-            return [line.strip() for line in lines]
+            return [
+                normalize_string(line.strip(), remove_spaces=False) for line in lines
+            ]
 
     def check_spaces(self, test: str, baseline: str) -> list[int, int]:
         i = 0
@@ -466,7 +384,7 @@ class SplitsOnSpace(SingleTokenizerMetric):
             else:
                 # TODO: Currently we just break if the BPE decoding is too weird.
                 # Fix if possible.
-                print(baseline[:i])
-                print(test[:j])
+                print(baseline[:i] + "**" + baseline[i + 1 :])
+                print(test[:j] + "**" + test[j + 1 :])
                 break
         return [kept, total]
