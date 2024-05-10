@@ -124,7 +124,12 @@ def get_desired_vocab_size(
 
     # if we are growing the vocabulary linearly
     if num_vocab_merges_per_step is not None:
-        return len(initial_alphabet) + step * num_vocab_merges_per_step
+        return max(
+            min(
+                len(initial_alphabet) + step * num_vocab_merges_per_step, max_vocab_size
+            ),
+            len(initial_alphabet),
+        )
 
     # if we are growing the vocab exponentially
     return max(
@@ -188,6 +193,7 @@ def main(
         "bpe_batches": bpe_batches if incremental else 1,
         "large_track": large_track,
         "subsample": subsample,
+        "project_dir": str(project_dir),
     }
 
     print(f"Config: {pformat(tokenizer_hps)}")
@@ -225,13 +231,6 @@ def main(
             min_frequency=min_frequency,
             split_on_space=split_on_space,
         )
-
-        # if subsample is not None:
-        #     train_data = dataset=dataset["text"][s:e]
-        #     print(train_data)
-        #     train_data = train_data.select(range(subsample))
-        #     print(train_data)
-        #     raise SystemExit
 
         train_data = dataset["text"][s:e]
 
