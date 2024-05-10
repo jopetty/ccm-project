@@ -343,9 +343,9 @@ class SplitsOnSpace(SingleTokenizerMetric):
             tokenized_line = remove_tokenizer_formatting(
                 self.tokenizer.encode(line, add_special_tokens=False).tokens
             )
-            tokenized = "|".join(tokenized_line).strip()
+            tokenized = "|".join(tokenized_line).strip().replace("[UNK]", "")
             space_split = re.sub(
-                r"\s+", "|", self.normalizer.normalize_str(line)
+                r"\s+", "|", self.normalizer.normalize_str(line).replace("[UNK]", "")
             ).strip()
             if self.baseline == "gold":
                 kept, total = self.check_spaces(tokenized, space_split)
