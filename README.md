@@ -1,6 +1,8 @@
-# ccm-project
+# growing-tokens
 
-## Installation Steps
+Can you train a tokenizer while training a language model? Kind of! This project shows how you can train a language model starting with a character-level tokenizer and progressively merging tokens with high mutual information over the course of training. We provide a demonstration for how to train on the BabyLM corpus.
+
+## Installation Steps on Greene
 
 1. Clone this repo to `/scratch/NETID` and `cd` into it.
 2. Move to an interactive job node:
